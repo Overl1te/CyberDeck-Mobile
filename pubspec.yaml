@@ -1,7 +1,7 @@
 name: cyberdeck_mobile
 description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -19,6 +19,10 @@ dependencies:
   
   # Fonts
   google_fonts: ^7.1.0
+
+  path_provider: ^2.1.2
+  uuid: ^4.3.3
+  file_picker: ^10.3.8
 
 dev_dependencies:
   flutter_test:
