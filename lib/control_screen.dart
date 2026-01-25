@@ -2,11 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/io.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart'; // Нужно для открытия браузера
 import 'mjpeg_view.dart';
 import 'theme.dart';
 
@@ -92,43 +95,142 @@ class _ControlScreenState extends State<ControlScreen> {
     try { await http.post(Uri.parse('http://${widget.ip}$path'), headers: {'Authorization': 'Bearer ${widget.token}'}); } catch (_) {}
   }
 
+  // === НОВАЯ ЛОГИКА СКАЧИВАНИЯ (HTTP + БРАУЗЕР ФАЛБЕК) ===
   Future<void> _handleIncomingFile(Map<String, dynamic> data) async {
     final filename = data['filename'];
-    final relativeUrl = data['url']; 
+    final urlString = data['url']; // Ссылка http://...
+
+    // 1. Спрашиваем юзера
     bool? accept = await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kPanelColor,
         title: const Text("File Request", style: TextStyle(color: kAccentColor)),
-        content: Text("Receive '$filename'?"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("Receive: $filename", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+            const SizedBox(height: 5),
+            Text(data['size'] != null ? "${(data['size']/1024/1024).toStringAsFixed(2)} MB" : "", style: const TextStyle(color: Colors.grey)),
+          ],
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("No")),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Yes", style: TextStyle(color: kAccentColor))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("DOWNLOAD", style: TextStyle(color: kAccentColor, fontWeight: FontWeight.bold))),
         ],
       )
     );
-    if (accept == true) {
-      try {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Downloading...")));
-        final response = await http.get(Uri.parse('http://${widget.ip}$relativeUrl'));
-        if (response.statusCode == 200) {
-          // Сохраняем в Downloads (Android)
-          Directory? dir = Directory('/storage/emulated/0/Download');
-          if (!dir.existsSync()) dir = await getApplicationDocumentsDirectory();
-          final file = File('${dir.path}/$filename');
-          await file.writeAsBytes(response.bodyBytes);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Saved to: ${file.path}"), backgroundColor: Colors.green));
-        }
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Err: $e"), backgroundColor: kErrorColor));
+
+    if (accept != true) return;
+
+    // 2. Определяем путь (Android vs PC)
+    String? savePath;
+    
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      // Для ПК пытаемся найти системную папку Загрузки
+      final downloadsDir = await getDownloadsDirectory(); 
+      final baseDir = downloadsDir ?? await getApplicationDocumentsDirectory(); 
+      savePath = '${baseDir.path}/$filename';
+    } else if (Platform.isAndroid) {
+      // /storage/emulated/0/ — это КОРЕНЬ памяти телефона. Это НЕ эмулятор.
+      savePath = '/storage/emulated/0/Download/$filename';
+    } else {
+      // iOS
+      final dir = await getApplicationDocumentsDirectory();
+      savePath = '${dir.path}/$filename';
+    }
+
+    // 3. Проверка прав (Только Android)
+    bool hasPermission = false;
+    if (Platform.isAndroid) {
+      final deviceInfo = await DeviceInfoPlugin().androidInfo;
+      // Android 11+
+      if (deviceInfo.version.sdkInt >= 30) {
+        var status = await Permission.manageExternalStorage.status;
+        if (!status.isGranted) status = await Permission.manageExternalStorage.request();
+        hasPermission = status.isGranted;
+      } else {
+        // Android 10 и старее
+        var status = await Permission.storage.status;
+        if (!status.isGranted) status = await Permission.storage.request();
+        hasPermission = status.isGranted;
+      }
+    } else {
+      hasPermission = true; // На ПК права обычно есть
+    }
+
+    // 4. ЕСЛИ ПРАВ НЕТ — ОТКРЫВАЕМ БРАУЗЕР (Фалбек)
+    if (!hasPermission) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text("No permission. Opening browser..."), 
+        backgroundColor: Colors.orange,
+        duration: Duration(seconds: 2),
+      ));
+      
+      final uri = Uri.parse(urlString);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+      return; 
+    }
+
+    // 5. Качаем файл (Потоковый HTTP)
+    try {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Downloading...")));
+      
+      File file = File(savePath);
+      // Если файл существует — меняем имя (file(1).txt)
+      int i = 1;
+      while (file.existsSync()) {
+        final nameParts = filename.split('.');
+        final ext = nameParts.length > 1 ? ".${nameParts.last}" : "";
+        final name = nameParts.length > 1 ? nameParts.sublist(0, nameParts.length - 1).join('.') : filename;
+        
+        // Корректный разделитель пути для всех ОС
+        final separator = Platform.pathSeparator;
+        final parent = file.parent.path;
+        file = File('$parent$separator$name($i)$ext');
+        i++;
+      }
+
+      // Создаем папку если её нет (на всякий случай)
+      if (!file.parent.existsSync()) {
+        await file.parent.create(recursive: true);
+      }
+
+      // Качаем поток
+      final request = http.Request('GET', Uri.parse(urlString));
+      final response = await http.Client().send(request);
+      
+      if (response.statusCode == 200) {
+        final sink = file.openWrite();
+        await response.stream.pipe(sink); // Переливаем данные
+        await sink.close();
+        
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("Saved: ${file.path.split(Platform.pathSeparator).last}"), 
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 5),
+        ));
+      } else {
+        throw "HTTP ${response.statusCode}";
+      }
+
+    } catch (e) {
+      // Если ошибка — пробуем браузер
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e. Trying browser..."), backgroundColor: kErrorColor));
+       final uri = Uri.parse(urlString);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
       }
     }
   }
-
+  
   void _handlePointerMove(PointerMoveEvent e) {
     if (_showKeyboard) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - _lastSendTime < 16) return; // 60 FPS cap
+    if (now - _lastSendTime < 16) return; 
     _lastSendTime = now;
 
     if (_skipNextMove) { _lastX = e.position.dx; _lastY = e.position.dy; _skipNextMove = false; return; }
@@ -188,7 +290,7 @@ class _ControlScreenState extends State<ControlScreen> {
             child: Column(
               children: [
                 _glassPanel(child: Row(children: [
-                  _btn("EXIT", Colors.orange, () => Navigator.pop(context)), // ЗАЩИТА ОТ ВЫКЛЮЧЕНИЯ
+                  _btn("EXIT", Colors.orange, () => Navigator.pop(context)),
                   const Spacer(),
                   Column(children: [Text(_isConnected ? "CONNECTED" : "OFFLINE", style: TextStyle(color: _isConnected ? kAccentColor : Colors.grey, fontWeight: FontWeight.bold)), Text("CPU $_cpu", style: const TextStyle(fontSize: 10, color: Colors.grey))]),
                   const Spacer(),
