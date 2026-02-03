@@ -1,7 +1,7 @@
 name: cyberdeck_mobile
 description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.1+1
+version: 1.0.2+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -26,6 +26,7 @@ dependencies:
   permission_handler: ^12.0.1
   device_info_plus: ^12.3.0
   url_launcher: ^6.3.2
+  mobile_scanner: ^7.1.4
 
 dev_dependencies:
   flutter_test:
