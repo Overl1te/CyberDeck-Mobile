@@ -229,7 +229,7 @@ class _DeviceSettingsScreenState extends State<DeviceSettingsScreen> {
                         value: _s.showCursor,
                         onChanged: (v) => setState(() => _s = _s.copyWith(showCursor: v)),
                         title: const Text('\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u043a\u0443\u0440\u0441\u043e\u0440'),
-                        subtitle: const Text('\u0414\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 \u043e\u0432\u0435\u0440\u043b\u0435\u0439 \u043a\u0443\u0440\u0441\u043e\u0440\u0430 \u0432 \u043f\u043e\u0442\u043e\u043a', style: TextStyle(color: Colors.grey)),
+                        subtitle: const Text('\u0414\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 \u043e\u0432\u0435\u0440\u043b\u0435\u0439 \u043a\u0443\u0440\u0441\u043e\u0440\u0430 \u043f\u043e\u0432\u0435\u0440\u0445 \u043f\u043e\u0442\u043e\u043a\u0430', style: TextStyle(color: Colors.grey)),
                         activeColor: kAccentColor,
                       ),
                       SwitchListTile(

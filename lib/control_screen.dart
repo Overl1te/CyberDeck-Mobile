@@ -60,11 +60,12 @@ class _ControlScreenState extends State<ControlScreen> {
   int _lastFrameKb = 0;
   int _lastDecodeMs = 0;
 
+  static const Size _cursorSize = Size(16, 16);
   Size _videoSize = Size.zero;
   Size _frameSize = Size.zero;
-  final GlobalKey _videoKey = GlobalKey();
   Offset _cursor = Offset.zero;
   bool _cursorInit = false;
+
 
   @override
   void initState() {
@@ -102,8 +103,13 @@ class _ControlScreenState extends State<ControlScreen> {
         (message) async {
           try {
             final data = jsonDecode(message);
-            if (data is Map && data['type'] == 'file_transfer') {
-              await FileTransfer.handleIncomingFile(context, Map<String, dynamic>.from(data), _settings);
+            if (data is Map) {
+              final type = (data['type'] ?? '').toString();
+              if (type == 'file_transfer') {
+                await FileTransfer.handleIncomingFile(context, Map<String, dynamic>.from(data), _settings);
+              } else if (type == 'cursor') {
+                _updateCursorFromRemote(data);
+              }
             }
           } catch (_) {}
         },
@@ -176,10 +182,6 @@ class _ControlScreenState extends State<ControlScreen> {
   void _handlePointerMove(PointerMoveEvent e) {
     if (_showKeyboard) return;
 
-    if (_settings.showCursor && _pointerCount == 1) {
-      _updateCursorFromGlobal(e.position);
-    }
-
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastSendTime < 16) return;
     _lastSendTime = now;
@@ -243,9 +245,6 @@ class _ControlScreenState extends State<ControlScreen> {
       _lastY = e.position.dy;
       _hasMoved = false;
       _isDragging = false;
-      if (_settings.showCursor) {
-        _updateCursorFromGlobal(e.position);
-      }
     }
 
     if (_pointerCount == 1 && (DateTime.now().millisecondsSinceEpoch - _lastTapTime) < 250) {
@@ -286,28 +285,28 @@ class _ControlScreenState extends State<ControlScreen> {
     return Alignment.center.inscribe(fitted.destination, Offset.zero & outputSize);
   }
 
-  Offset? _globalToVideo(Offset global) {
-    final ctx = _videoKey.currentContext;
-    if (ctx == null) return null;
-    final ro = ctx.findRenderObject();
-    if (ro is! RenderBox || !ro.hasSize) return null;
-    return ro.globalToLocal(global);
-  }
-
-  void _updateCursorFromGlobal(Offset global) {
-    final local = _globalToVideo(global);
-    if (local == null) return;
+  void _updateCursorFromRemote(Map data) {
+    if (!_settings.showCursor) return;
+    final x = (data['x'] as num?)?.toDouble();
+    final y = (data['y'] as num?)?.toDouble();
+    final w = (data['w'] as num?)?.toDouble();
+    final h = (data['h'] as num?)?.toDouble();
+    if (x == null || y == null || w == null || h == null) return;
+    if (w <= 0 || h <= 0) return;
 
     final rect = _computeImageRect(_videoSize);
     if (rect.isEmpty) return;
 
-    const cursorSize = Size(22, 22);
-    final dx = local.dx.clamp(rect.left, rect.right - cursorSize.width);
-    final dy = local.dy.clamp(rect.top, rect.bottom - cursorSize.height);
+    final nx = (x / w).clamp(0.0, 1.0);
+    final ny = (y / h).clamp(0.0, 1.0);
+    final left = rect.left + rect.width * nx;
+    final top = rect.top + rect.height * ny;
+    final clampedLeft = left.clamp(rect.left, rect.right - _cursorSize.width);
+    final clampedTop = top.clamp(rect.top, rect.bottom - _cursorSize.height);
 
     if (mounted) {
       setState(() {
-        _cursor = Offset(dx, dy);
+        _cursor = Offset(clampedLeft, clampedTop);
         _cursorInit = true;
       });
     }
@@ -321,7 +320,7 @@ class _ControlScreenState extends State<ControlScreen> {
         'max_w': _settings.streamMaxWidth.toString(),
         'quality': _settings.streamQuality.toString(),
         'fps': _settings.streamFps.toString(),
-        'cursor': _settings.showCursor ? '1' : '0',
+        'cursor': '0',
         'low_latency': _settings.lowLatency ? '1' : '0',
       },
     );
@@ -337,23 +336,7 @@ class _ControlScreenState extends State<ControlScreen> {
                 builder: (ctx, constraints) {
                   final size = constraints.biggest;
                   _videoSize = size;
-                  final imageRect = _computeImageRect(size);
-
-                  if (!_cursorInit && _frameSize.width > 0 && _frameSize.height > 0 && imageRect.isEmpty == false) {
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (!mounted || _cursorInit) return;
-                      const cursorSize = Size(22, 22);
-                      final cx = (imageRect.center.dx).clamp(imageRect.left, imageRect.right - cursorSize.width);
-                      final cy = (imageRect.center.dy).clamp(imageRect.top, imageRect.bottom - cursorSize.height);
-                      setState(() {
-                        _cursorInit = true;
-                        _cursor = Offset(cx, cy);
-                      });
-                    });
-                  }
-
                   return Stack(
-                    key: _videoKey,
                     children: [
                       Positioned.fill(
                         child: MjpegView(
@@ -384,8 +367,8 @@ class _ControlScreenState extends State<ControlScreen> {
                         Positioned(
                           left: _cursor.dx,
                           top: _cursor.dy,
-                          child: IgnorePointer(
-                            child: const _CursorOverlay(),
+                          child: const IgnorePointer(
+                            child: _CursorOverlay(),
                           ),
                         ),
                     ],
@@ -450,121 +433,126 @@ class _ControlScreenState extends State<ControlScreen> {
               ],
             ),
           ),
+
           AnimatedPositioned(
             duration: const Duration(milliseconds: 300),
             bottom: _showKeyboard ? 0 : -400,
             left: 0,
             right: 0,
-            child: Container(
-              height: 350,
-              padding: const EdgeInsets.all(20),
-              decoration: const BoxDecoration(
-                color: Color(0xFF0A0A0A),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-              ),
-              child: Column(
-                children: [
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'Горячие клавиши',
-                      style: TextStyle(color: Colors.white.withOpacity(0.5), fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(child: _keyBtn('Alt+Tab', () => _sendHotkey(['alt', 'tab']), accent: true)),
-                      const SizedBox(width: 8),
-                      Expanded(child: _keyBtn('Win+D', () => _sendHotkey(['win', 'd']), accent: true)),
-                      const SizedBox(width: 8),
-                      Expanded(child: _keyBtn('Esc', () => _sendKey('esc'))),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(child: _keyBtn('Ctrl+C', () => _sendHotkey(['ctrl', 'c']))),
-                      const SizedBox(width: 8),
-                      Expanded(child: _keyBtn('Ctrl+V', () => _sendHotkey(['ctrl', 'v']))),
-                      const SizedBox(width: 8),
-                      Expanded(child: _keyBtn('TaskMgr', () => _sendHotkey(['ctrl', 'shift', 'esc']))),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  const Divider(color: Colors.white12, height: 1),
-                  const SizedBox(height: 14),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _msgController,
-                          style: const TextStyle(color: Colors.white),
-                          decoration: const InputDecoration(
-                            filled: true,
-                            fillColor: Color(0xFF1A1A1A),
-                            hintText: '\u0412\u0432\u043e\u0434...',
-                            border: OutlineInputBorder(),
-                          ),
-                          onSubmitted: (v) {
-                            _send({'type': 'text', 'text': v});
-                            _msgController.clear();
-                          },
-                        ),
+            child: SafeArea(
+              top: false,
+              child: Container(
+                height: 350,
+                padding: const EdgeInsets.all(20),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF0A0A0A),
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                child: Column(
+                  children: [
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Горячие клавиши',
+                        style: TextStyle(color: Colors.white.withOpacity(0.5), fontWeight: FontWeight.w600),
                       ),
-                      const SizedBox(width: 10),
-                      SizedBox(
-                        height: 42,
-                        child: Material(
-                          color: kAccentColor,
-                          borderRadius: BorderRadius.circular(10),
-                          child: InkWell(
-                            onTap: () {
-                              _send({'type': 'text', 'text': _msgController.text});
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(child: _keyBtn('Alt+Tab', () => _sendHotkey(['alt', 'tab']), accent: true)),
+                        const SizedBox(width: 8),
+                        Expanded(child: _keyBtn('Win+D', () => _sendHotkey(['win', 'd']), accent: true)),
+                        const SizedBox(width: 8),
+                        Expanded(child: _keyBtn('Esc', () => _sendKey('esc'))),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(child: _keyBtn('Ctrl+C', () => _sendHotkey(['ctrl', 'c']))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _keyBtn('Ctrl+V', () => _sendHotkey(['ctrl', 'v']))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _keyBtn('TaskMgr', () => _sendHotkey(['ctrl', 'shift', 'esc']))),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    const Divider(color: Colors.white12, height: 1),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _msgController,
+                            style: const TextStyle(color: Colors.white),
+                            decoration: const InputDecoration(
+                              filled: true,
+                              fillColor: Color(0xFF1A1A1A),
+                              hintText: 'Ввод...',
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (v) {
+                              _send({'type': 'text', 'text': v});
                               _msgController.clear();
                             },
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        SizedBox(
+                          height: 42,
+                          child: Material(
+                            color: kAccentColor,
                             borderRadius: BorderRadius.circular(10),
-                            child: const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 14),
-                              child: Center(
-                                child: Text('\u041e\u0422\u041f\u0420\u0410\u0412\u0418\u0422\u042c', style: TextStyle(color: Colors.black, fontWeight: FontWeight.w800)),
+                            child: InkWell(
+                              onTap: () {
+                                _send({'type': 'text', 'text': _msgController.text});
+                                _msgController.clear();
+                              },
+                              borderRadius: BorderRadius.circular(10),
+                              child: const Padding(
+                                padding: EdgeInsets.symmetric(horizontal: 14),
+                                child: Center(
+                                  child: Text('ОТПРАВИТЬ', style: TextStyle(color: Colors.black, fontWeight: FontWeight.w800)),
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 15),
-                  Row(
-                    children: [
-                      Expanded(child: _keyBtn('⌫', () => _send({'type': 'key', 'key': 'backspace'}))),
-                      const SizedBox(width: 8),
-                      Expanded(child: _keyBtn('\u041f\u0420\u041e\u0411\u0415\u041b', () => _send({'type': 'key', 'key': 'space'}))),
-                      const SizedBox(width: 8),
-                      Expanded(child: _keyBtn('ENTER', () => _send({'type': 'key', 'key': 'enter'}))),
-                    ],
-                  ),
-                  const Spacer(),
-                  SizedBox(
-                    height: 42,
-                    width: double.infinity,
-                    child: Material(
-                      color: const Color(0xFF160000),
-                      borderRadius: BorderRadius.circular(12),
-                      child: InkWell(
-                        onTap: () => setState(() => _showKeyboard = false),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+                    Row(
+                      children: [
+                        Expanded(child: _keyBtn('\u232b', () => _send({'type': 'key', 'key': 'backspace'}))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _keyBtn('\u041f\u0420\u041e\u0411\u0415\u041b', () => _send({'type': 'key', 'key': 'space'}))),
+                        const SizedBox(width: 8),
+                        Expanded(child: _keyBtn('ENTER', () => _send({'type': 'key', 'key': 'enter'}))),
+                      ],
+                    ),
+                    const Spacer(),
+                    SizedBox(
+                      height: 42,
+                      width: double.infinity,
+                      child: Material(
+                        color: const Color(0xFF160000),
                         borderRadius: BorderRadius.circular(12),
-                        child: const Center(
-                          child: Text('\u0417\u0410\u041a\u0420\u042b\u0422\u042c', style: TextStyle(color: Color(0xFFFF5A5A), fontWeight: FontWeight.w800)),
+                        child: InkWell(
+                          onTap: () => setState(() => _showKeyboard = false),
+                          borderRadius: BorderRadius.circular(12),
+                          child: const Center(
+                            child: Text('ЗАКРЫТЬ', style: TextStyle(color: Color(0xFFFF5A5A), fontWeight: FontWeight.w800)),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           )
+
         ],
       ),
     );
@@ -644,7 +632,7 @@ class _CursorOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return CustomPaint(
-      size: const Size(22, 22),
+      size: _ControlScreenState._cursorSize,
       painter: const _CursorPainter(),
     );
   }
@@ -655,39 +643,34 @@ class _CursorPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
     final p = Path()
       ..moveTo(0, 0)
-      ..lineTo(0, size.height * 0.82)
-      ..lineTo(size.width * 0.22, size.height * 0.64)
-      ..lineTo(size.width * 0.36, size.height * 0.98)
-      ..lineTo(size.width * 0.50, size.height * 0.92)
-      ..lineTo(size.width * 0.36, size.height * 0.58)
-      ..lineTo(size.width * 0.66, size.height * 0.58)
+      ..lineTo(0, h * 0.78)
+      ..lineTo(w * 0.24, h * 0.60)
+      ..lineTo(w * 0.34, h)
+      ..lineTo(w * 0.50, h * 0.94)
+      ..lineTo(w * 0.38, h * 0.58)
+      ..lineTo(w * 0.62, h * 0.58)
       ..close();
 
     final shadow = Paint()
-      ..color = Colors.black.withOpacity(0.55)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
+      ..color = Colors.black.withOpacity(0.2)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.2);
     canvas.save();
-    canvas.translate(1.2, 1.2);
+    canvas.translate(1, 1);
     canvas.drawPath(p, shadow);
     canvas.restore();
 
-    final fill = Paint()..color = const Color(0xFFF2F2F2);
+    final fill = Paint()..color = Colors.white;
     canvas.drawPath(p, fill);
 
     final stroke = Paint()
-      ..color = Colors.black.withOpacity(0.85)
+      ..color = Colors.black
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.6;
+      ..strokeWidth = 1.0;
     canvas.drawPath(p, stroke);
-
-    final glow = Paint()
-      ..color = kAccentColor.withOpacity(0.25)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.4
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
-    canvas.drawPath(p, glow);
   }
 
   @override
