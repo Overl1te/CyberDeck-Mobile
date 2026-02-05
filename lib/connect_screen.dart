@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import 'device_storage.dart';
 import 'home_screen.dart';
+import 'qr_payload_parser.dart';
 import 'qr_scan_screen.dart';
 import 'services_discovery.dart';
 import 'theme.dart';
@@ -92,12 +93,16 @@ class _ConnectScreenState extends State<ConnectScreen> {
     if (_qrBusy) return;
     setState(() => _qrBusy = true);
     try {
-      final raw = await Navigator.push<String?>(context, MaterialPageRoute(builder: (_) => const QrScanScreen()));
+      final raw = await Navigator.push<String?>(
+          context, MaterialPageRoute(builder: (_) => const QrScanScreen()));
       if (!mounted || raw == null) return;
 
-      final data = _parseQrPayload(raw);
+      // QR теперь может быть ссылкой вида:
+      // http://.../?type=cyberdeck_qr_v1&ip=...&port=...&code=...
+      final data = parseCyberdeckQrPayload(raw);
       if (data == null) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('QR не распознан')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('QR не распознан')));
         return;
       }
 
@@ -110,11 +115,18 @@ class _ConnectScreenState extends State<ConnectScreen> {
         _codeController.text = data.code!;
       }
 
-      final title = (data.hostname != null && data.hostname!.trim().isNotEmpty) ? data.hostname!.trim() : null;
-      final subtitle = (data.version != null && data.version!.trim().isNotEmpty) ? data.version!.trim() : null;
+      final title = (data.hostname != null && data.hostname!.trim().isNotEmpty)
+          ? data.hostname!.trim()
+          : null;
+      final subtitle = (data.version != null && data.version!.trim().isNotEmpty)
+          ? data.version!.trim()
+          : null;
       if (title != null) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(subtitle == null ? 'Найден ПК: $title' : 'Найден ПК: $title • $subtitle')),
+          SnackBar(
+              content: Text(subtitle == null
+                  ? 'Найден ПК: $title'
+                  : 'Найден ПК: $title • $subtitle')),
         );
       }
 
@@ -125,7 +137,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
       }
 
       if (data.code != null && data.host != null) {
-        await _connect(manualIp: '${data.host!}:${data.port ?? _appSettings.defaultPort}');
+        await _connect(
+            manualIp: '${data.host!}:${data.port ?? _appSettings.defaultPort}');
         return;
       }
 
@@ -137,82 +150,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
     }
   }
 
-  _QrData? _parseQrPayload(String raw) {
-    final s = raw.trim();
-    if (s.isEmpty) return null;
-
-    final uri = Uri.tryParse(s);
-    if (uri != null && uri.hasScheme && uri.scheme.toLowerCase().startsWith('cyberdeck')) {
-      final host = uri.queryParameters['host'] ?? uri.queryParameters['ip'] ?? uri.queryParameters['addr'];
-      final port = int.tryParse(uri.queryParameters['port'] ?? '');
-      final code = uri.queryParameters['code'];
-      final qrToken = uri.queryParameters['qr_token'] ?? uri.queryParameters['token'];
-      return _QrData(host: host, port: port, code: code, qrToken: qrToken);
-    }
-
-    if (s.startsWith('{') && s.endsWith('}')) {
-      try {
-        final obj = jsonDecode(s);
-        if (obj is Map) {
-          final host = (obj['host'] ?? obj['ip'] ?? obj['addr'])?.toString();
-          final port = (obj['port'] is num) ? (obj['port'] as num).toInt() : int.tryParse((obj['port'] ?? '').toString());
-          final code = (obj['code'] ?? obj['pairing_code'] ?? obj['pairingCode'])?.toString();
-          final qrToken = (obj['qr_token'] ?? obj['token'])?.toString();
-          return _QrData(
-            host: host,
-            port: port,
-            code: code,
-            qrToken: qrToken,
-            type: obj['type']?.toString(),
-            serverId: obj['server_id']?.toString(),
-            hostname: obj['hostname']?.toString(),
-            version: obj['version']?.toString(),
-            nonce: obj['nonce']?.toString(),
-            ts: (obj['ts'] is num) ? (obj['ts'] as num).toInt() : int.tryParse((obj['ts'] ?? '').toString()),
-          );
-        }
-      } catch (_) {}
-    }
-
-    final partsPipe = s.split('|');
-    if (partsPipe.length >= 2) {
-      final a = partsPipe[0].trim();
-      final b = partsPipe[1].trim();
-      final hp = _splitHostPort(a);
-      if (hp != null) {
-        return _QrData(host: hp.$1, port: hp.$2, code: b);
-      }
-    }
-
-    final partsSpace = s.split(RegExp(r'\s+'));
-    if (partsSpace.length >= 2) {
-      final hp = _splitHostPort(partsSpace[0]);
-      if (hp != null) {
-        return _QrData(host: hp.$1, port: hp.$2, code: partsSpace[1]);
-      }
-    }
-
-    final hp = _splitHostPort(s);
-    if (hp != null) {
-      return _QrData(host: hp.$1, port: hp.$2);
-    }
-
-    return null;
-  }
-
-  (String, int)? _splitHostPort(String hostPort) {
-    final t = hostPort.trim();
-    if (!t.contains(':')) return null;
-    final parts = t.split(':');
-    if (parts.isEmpty) return null;
-    final host = parts.first.trim();
-    if (host.isEmpty) return null;
-    final port = int.tryParse(parts.length > 1 ? parts[1].trim() : '');
-    if (port == null) return null;
-    return (host, port);
-  }
-
-  Future<void> _qrLogin({required String host, required int port, required String qrToken}) async {
+  Future<void> _qrLogin(
+      {required String host,
+      required int port,
+      required String qrToken}) async {
     setState(() => _isLoading = true);
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -231,7 +172,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
       };
 
       final resp = await http
-          .post(url, headers: {'Content-Type': 'application/json'}, body: jsonEncode(reqBody))
+          .post(url,
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(reqBody))
           .timeout(const Duration(seconds: 6));
 
       if (resp.statusCode == 501) {
@@ -260,12 +203,16 @@ class _ConnectScreenState extends State<ConnectScreen> {
       if (Navigator.canPop(context)) {
         Navigator.pop(context);
       } else {
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+        Navigator.pushReplacement(
+            context, MaterialPageRoute(builder: (_) => const HomeScreen()));
       }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e'), backgroundColor: kErrorColor, duration: const Duration(seconds: 5)),
+        SnackBar(
+            content: Text('Ошибка: $e'),
+            backgroundColor: kErrorColor,
+            duration: const Duration(seconds: 5)),
       );
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -279,7 +226,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
     if (raw.contains(':')) {
       final parts = raw.split(':');
       final host = parts[0].trim();
-      final port = int.tryParse(parts.length > 1 ? parts[1].trim() : '') ?? _appSettings.defaultPort;
+      final port = int.tryParse(parts.length > 1 ? parts[1].trim() : '') ??
+          _appSettings.defaultPort;
       return [
         {'ip': host, 'port': port}
       ];
@@ -294,7 +242,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
     final code = _codeController.text.trim();
 
     if (ipInput.isEmpty || code.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Введите IP и код')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Введите IP и код')));
       return;
     }
 
@@ -329,7 +278,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
         try {
           final response = await http
-              .post(url, headers: {'Content-Type': 'application/json'}, body: jsonEncode(reqBody))
+              .post(url,
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode(reqBody))
               .timeout(const Duration(seconds: 6));
 
           if (response.statusCode == 200) {
@@ -339,8 +290,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
             chosen = {'ip': host, 'port': port};
             break;
           }
-        } catch (_) {
-        }
+        } catch (_) {}
       }
 
       if (token == null || chosen == null) {
@@ -365,7 +315,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
       if (Navigator.canPop(context)) {
         Navigator.pop(context);
       } else {
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomeScreen()));
+        Navigator.pushReplacement(
+            context, MaterialPageRoute(builder: (_) => const HomeScreen()));
       }
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -399,33 +350,44 @@ class _ConnectScreenState extends State<ConnectScreen> {
             children: [
               const Text(
                 'НОВОЕ ПОДКЛЮЧЕНИЕ',
-                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: kAccentColor, letterSpacing: 2),
+                style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    color: kAccentColor,
+                    letterSpacing: 2),
               ),
               const SizedBox(height: 40),
               TextField(
                 controller: _ipController,
-                style: const TextStyle(color: kAccentColor, fontFamily: 'monospace'),
+                style: const TextStyle(
+                    color: kAccentColor, fontFamily: 'monospace'),
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: const Color(0xFF111111),
-                  hintText: 'IP адрес (например 192.168.1.5 или 192.168.1.5:8080)',
+                  hintText:
+                      'IP адрес (например 192.168.1.5 или 192.168.1.5:8080)',
                   hintStyle: TextStyle(color: Colors.grey[700]),
-                  enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.grey[800]!)),
-                  focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: kAccentColor)),
+                  enabledBorder: OutlineInputBorder(
+                      borderSide: BorderSide(color: Colors.grey[800]!)),
+                  focusedBorder: const OutlineInputBorder(
+                      borderSide: BorderSide(color: kAccentColor)),
                 ),
               ),
               const SizedBox(height: 16),
               TextField(
                 controller: _codeController,
                 keyboardType: TextInputType.number,
-                style: const TextStyle(color: kAccentColor, fontFamily: 'monospace'),
+                style: const TextStyle(
+                    color: kAccentColor, fontFamily: 'monospace'),
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: const Color(0xFF111111),
                   hintText: 'КОД ПАРЫ',
                   hintStyle: TextStyle(color: Colors.grey[700]),
-                  enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.grey[800]!)),
-                  focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: kAccentColor)),
+                  enabledBorder: OutlineInputBorder(
+                      borderSide: BorderSide(color: Colors.grey[800]!)),
+                  focusedBorder: const OutlineInputBorder(
+                      borderSide: BorderSide(color: kAccentColor)),
                 ),
               ),
               const SizedBox(height: 40),
@@ -435,9 +397,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       width: double.infinity,
                       height: 50,
                       child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(backgroundColor: kAccentColor, foregroundColor: Colors.black),
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: kAccentColor,
+                            foregroundColor: Colors.black),
                         onPressed: () => _connect(),
-                        child: const Text('ПОДКЛЮЧИТЬ', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                        child: const Text('ПОДКЛЮЧИТЬ',
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 18)),
                       ),
                     ),
               const SizedBox(height: 20),
@@ -453,21 +419,29 @@ class _ConnectScreenState extends State<ConnectScreen> {
               TextButton.icon(
                 onPressed: _isScanning ? null : _startScan,
                 icon: _isScanning
-                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.radar),
                 label: Text(_isScanning ? 'СКАНИРУЮ...' : 'СКАНИРОВАТЬ СЕТЬ'),
                 style: TextButton.styleFrom(foregroundColor: Colors.white),
               ),
               if (_foundDevices.isNotEmpty) ...[
                 const SizedBox(height: 10),
-                const Text('Найденные устройства:', style: TextStyle(color: kAccentColor)),
+                const Text('Найденные устройства:',
+                    style: TextStyle(color: kAccentColor)),
                 const SizedBox(height: 5),
                 ..._foundDevices.map(
                   (d) => ListTile(
                     tileColor: const Color(0xFF1A1A1A),
-                    leading: const Icon(Icons.desktop_windows, color: kAccentColor),
-                    title: Text(d.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                    subtitle: Text('${d.ip}:${d.port}  •  ${d.version}', style: const TextStyle(color: Colors.grey)),
+                    leading:
+                        const Icon(Icons.desktop_windows, color: kAccentColor),
+                    title: Text(d.name,
+                        style: const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.bold)),
+                    subtitle: Text('${d.ip}:${d.port}  •  ${d.version}',
+                        style: const TextStyle(color: Colors.grey)),
                     onTap: () {
                       _ipController.text = '${d.ip}:${d.port}';
                     },
@@ -480,30 +454,4 @@ class _ConnectScreenState extends State<ConnectScreen> {
       ),
     );
   }
-}
-
-class _QrData {
-  final String? host;
-  final int? port;
-  final String? code;
-  final String? qrToken;
-  final String? type;
-  final String? serverId;
-  final String? hostname;
-  final String? version;
-  final String? nonce;
-  final int? ts;
-
-  const _QrData({
-    this.host,
-    this.port,
-    this.code,
-    this.qrToken,
-    this.type,
-    this.serverId,
-    this.hostname,
-    this.version,
-    this.nonce,
-    this.ts,
-  });
 }
