@@ -1,42 +1,22 @@
 import 'dart:convert';
 
-/// Результат разбора QR-пейлоада CyberDeck.
-///
-/// Поля заполняются по возможности: один и тот же QR может содержать
-/// только часть информации (например, только `host/port`, или `code`, или
-/// метаданные типа `hostname/version`).
+import 'network/host_port.dart';
+
 class CyberdeckQrData {
-  /// IP/хост сервера (например, `192.168.0.201`).
+  final String scheme;
   final String? host;
-
-  /// Порт сервера (например, `8080`).
   final int? port;
-
-  /// Код привязки/пары (то, что вводится в поле "КОД ПАРЫ").
   final String? code;
-
-  /// Токен для QR-логина (если сервер поддерживает `/api/qr/login`).
   final String? qrToken;
-
-  /// Тип протокола/формата QR (например, `cyberdeck_qr_v1`).
   final String? type;
-
-  /// ID сервера (если передан в QR как `server_id`).
   final String? serverId;
-
-  /// Имя ПК/хоста для отображения (если передано в QR как `hostname`).
   final String? hostname;
-
-  /// Версия сервера для отображения (если передана в QR как `version`).
   final String? version;
-
-  /// Nonce (одноразовый идентификатор, если присутствует).
   final String? nonce;
-
-  /// Timestamp (секунды), если присутствует.
   final int? ts;
 
   const CyberdeckQrData({
+    this.scheme = 'http',
     this.host,
     this.port,
     this.code,
@@ -50,17 +30,6 @@ class CyberdeckQrData {
   });
 }
 
-/// Разбирает строку из QR-кода в [CyberdeckQrData].
-///
-/// Поддерживаемые варианты (по приоритету):
-/// - `http/https` ссылка с `type=cyberdeck_qr_*` (новый формат)
-/// - `cyberdeck://...` (старый формат со своей схемой)
-/// - JSON (`{"ip":"...","port":...,"code":"..."}`)
-/// - `host:port|code`
-/// - `host:port code`
-/// - `host:port`
-///
-/// Возвращает `null`, если строка не похожа на QR CyberDeck.
 CyberdeckQrData? parseCyberdeckQrPayload(String raw) {
   final s = raw.trim();
   if (s.isEmpty) return null;
@@ -117,20 +86,24 @@ CyberdeckQrData? _parseCyberdeckQrUri(Uri uri) {
 
   final code = qp['code']?.trim();
   final qrToken = qp['qr_token'] ?? qp['token'];
+  final nonce = qp['nonce'];
   final serverId = qp['server_id'];
   final hostname = qp['hostname'];
   final version = qp['version'];
-  final nonce = qp['nonce'];
   final ts = int.tryParse(qp['ts'] ?? '');
 
   if (host == null &&
       port == null &&
       code == null &&
-      (qrToken == null || qrToken.isEmpty)) {
+      (qrToken == null || qrToken.isEmpty) &&
+      (nonce == null || nonce.isEmpty)) {
     return null;
   }
 
   return CyberdeckQrData(
+    scheme: _normalizeHttpScheme(
+      qp['scheme'] ?? (uri.scheme == 'https' ? 'https' : null),
+    ),
     host: host,
     port: port,
     code: code,
@@ -139,7 +112,7 @@ CyberdeckQrData? _parseCyberdeckQrUri(Uri uri) {
     serverId: serverId,
     hostname: hostname,
     version: version,
-    nonce: nonce,
+    nonce: (nonce?.trim().isNotEmpty == true) ? nonce!.trim() : null,
     ts: ts,
   );
 }
@@ -156,7 +129,9 @@ CyberdeckQrData? _parseCyberdeckQrJson(String s) {
     final code =
         (obj['code'] ?? obj['pairing_code'] ?? obj['pairingCode'])?.toString();
     final qrToken = (obj['qr_token'] ?? obj['token'])?.toString();
+    final nonce = obj['nonce']?.toString();
     return CyberdeckQrData(
+      scheme: _normalizeHttpScheme(obj['scheme']?.toString()),
       host: host,
       port: port,
       code: code,
@@ -165,7 +140,7 @@ CyberdeckQrData? _parseCyberdeckQrJson(String s) {
       serverId: obj['server_id']?.toString(),
       hostname: obj['hostname']?.toString(),
       version: obj['version']?.toString(),
-      nonce: obj['nonce']?.toString(),
+      nonce: nonce,
       ts: (obj['ts'] is num)
           ? (obj['ts'] as num).toInt()
           : int.tryParse((obj['ts'] ?? '').toString()),
@@ -194,13 +169,13 @@ CyberdeckQrData? _parseSpaceFormat(String s) {
 }
 
 (String, int)? _splitHostPort(String hostPort) {
-  final t = hostPort.trim();
-  if (!t.contains(':')) return null;
-  final parts = t.split(':');
-  if (parts.isEmpty) return null;
-  final host = parts.first.trim();
-  if (host.isEmpty) return null;
-  final port = int.tryParse(parts.length > 1 ? parts[1].trim() : '');
-  if (port == null) return null;
-  return (host, port);
+  final hp = parseHostPort(hostPort, requirePort: true);
+  if (hp == null) return null;
+  return (hp.host, hp.port);
+}
+
+String _normalizeHttpScheme(String? raw) {
+  final value = (raw ?? '').trim().toLowerCase();
+  if (value == 'https') return 'https';
+  return 'http';
 }

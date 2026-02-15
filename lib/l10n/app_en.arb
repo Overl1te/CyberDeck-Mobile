@@ -1,0 +1,91 @@
+{
+  "@@locale": "en",
+  "appTitle": "CyberDeck",
+  "newConnection": "NEW CONNECTION",
+  "ipHint": "IP or host (e.g. 192.168.1.5 or 192.168.1.5:8080)",
+  "pairingCodeHint": "PAIRING CODE",
+  "connect": "CONNECT",
+  "scanQr": "SCAN QR",
+  "openingCamera": "OPENING CAMERA...",
+  "scanNetwork": "SCAN NETWORK",
+  "scanning": "SCANNING...",
+  "discoveredDevices": "Discovered devices:",
+  "vpnWarningTitle": "VPN warning",
+  "vpnWarningBody": "Active VPN may block local network connection to CyberDeck. Disable VPN or allow local LAN access.",
+  "enterIpAndCode": "Enter IP and pairing code",
+  "connectionError": "Connection error: {error}",
+  "@connectionError": {
+    "placeholders": {
+      "error": {}
+    }
+  },
+  "qrNotRecognized": "QR not recognized",
+  "qrLoginNotSupported": "QR login is not supported by the server",
+  "qrTokenInvalidOrExpired": "QR token is invalid or expired",
+  "qrFallbackToHandshake": "QR login unavailable. Falling back to PIN handshake.",
+  "tlsInsecureWarning": "TLS connection is insecure or uses a self-signed certificate. Verify server certificate settings.",
+  "invalidResponseMissingToken": "Invalid response: missing token",
+  "invalidHostOrPort": "Invalid host or port",
+  "couldNotConnect": "Could not connect. Check code, host and port.",
+  "checking": "CHECKING...",
+  "online": "ONLINE",
+  "offline": "OFFLINE",
+  "touchpad": "TOUCHPAD",
+  "sendFileToPc": "Send file to PC",
+  "power": "Power",
+  "deviceSettings": "Device settings",
+  "uploading": "Uploading...",
+  "fileUploaded": "File uploaded!",
+  "uploadError": "Upload error: {error}",
+  "@uploadError": {
+    "placeholders": {
+      "error": {}
+    }
+  },
+  "uploadChecksumMismatch": "Upload failed: checksum mismatch",
+  "incomingFile": "Incoming file",
+  "acceptFile": "Accept: {filename}",
+  "@acceptFile": {
+    "placeholders": {
+      "filename": {}
+    }
+  },
+  "sizeMb": "{size} MB",
+  "@sizeMb": {
+    "placeholders": {
+      "size": {}
+    }
+  },
+  "no": "No",
+  "download": "Download",
+  "invalidTransferPayload": "Invalid file transfer payload (missing URL)",
+  "invalidDownloadUrl": "Invalid download URL",
+  "noStoragePermissionOpeningBrowser": "No storage permission. Opening browser...",
+  "noStoragePermission": "No storage permission",
+  "downloading": "Downloading...",
+  "savedFile": "Saved: {filename}",
+  "@savedFile": {
+    "placeholders": {
+      "filename": {}
+    }
+  },
+  "downloadErrorOpeningBrowser": "Download error: {error}. Opening browser...",
+  "@downloadErrorOpeningBrowser": {
+    "placeholders": {
+      "error": {}
+    }
+  },
+  "downloadError": "Download error: {error}",
+  "@downloadError": {
+    "placeholders": {
+      "error": {}
+    }
+  },
+  "cancel": "Cancel",
+  "uploadInProgress": "Upload in progress",
+  "downloadInProgress": "Download in progress",
+  "powerTitle": "Power",
+  "shutdown": "Shutdown",
+  "lock": "Lock",
+  "sleepNotImplemented": "Sleep mode is not implemented on the PC server yet."
+}

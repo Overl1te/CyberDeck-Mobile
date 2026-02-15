@@ -97,7 +97,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onChanged: (v) => setState(() => _s = _s.copyWith(autoScanOnConnect: v)),
                         title: const Text('\u0410\u0432\u0442\u043e\u0441\u043a\u0430\u043d \u0432 \u044d\u043a\u0440\u0430\u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f'),
                         subtitle: const Text('\u041f\u0440\u043e\u0431\u043e\u0432\u0430\u0442\u044c \u043d\u0430\u0439\u0442\u0438 \u041f\u041a \u0432 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u0441\u0435\u0442\u0438', style: TextStyle(color: Colors.grey)),
-                        activeColor: kAccentColor,
+                        activeThumbColor: kAccentColor,
                       ),
                     ],
                   ),

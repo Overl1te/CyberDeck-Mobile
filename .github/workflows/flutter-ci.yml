@@ -1,0 +1,47 @@
+name: Flutter CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+      - feature/**
+  pull_request:
+
+jobs:
+  analyze-test-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter Pub Get
+        run: flutter pub get
+
+      - name: Flutter Analyze
+        run: flutter analyze
+
+      - name: Flutter Test
+        if: ${{ hashFiles('test/**/*_test.dart') != '' }}
+        run: flutter test
+
+      - name: Skip Tests (No test files)
+        if: ${{ hashFiles('test/**/*_test.dart') == '' }}
+        run: echo "No *_test.dart files found. Skipping flutter test."
+
+      - name: Build APK (debug)
+        run: flutter build apk --debug

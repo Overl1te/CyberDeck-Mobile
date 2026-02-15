@@ -26,20 +26,26 @@ class MjpegViewStats {
 
 class MjpegView extends StatefulWidget {
   final String streamUrl;
+  final Map<String, String> headers;
   final Widget? errorBuilder;
   final Widget? loadingBuilder;
   final bool lowLatency;
   final int? cacheWidth;
+  final Duration initialFrameTimeout;
+  final ValueChanged<String>? onStreamFailure;
   final ValueChanged<MjpegViewStats>? onStats;
   final ValueChanged<Size>? onImageSize;
 
   const MjpegView({
     super.key,
     required this.streamUrl,
+    this.headers = const <String, String>{},
     this.errorBuilder,
     this.loadingBuilder,
     this.lowLatency = false,
     this.cacheWidth,
+    this.initialFrameTimeout = const Duration(seconds: 4),
+    this.onStreamFailure,
     this.onStats,
     this.onImageSize,
   });
@@ -65,10 +71,14 @@ class _MjpegViewState extends State<MjpegView> {
   int _imageWidth = 0;
   int _imageHeight = 0;
   Timer? _statsTimer;
+  Timer? _firstFrameTimer;
+  bool _hasFirstFrame = false;
+  bool _failureReported = false;
 
   @override
   void initState() {
     super.initState();
+    _armFirstFrameTimeout();
     _startStream();
     _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       final fps = _framesShown.toDouble();
@@ -92,6 +102,7 @@ class _MjpegViewState extends State<MjpegView> {
   void dispose() {
     _isActive = false;
     _statsTimer?.cancel();
+    _firstFrameTimer?.cancel();
     _subscription?.cancel();
     _client?.close();
     _image?.dispose();
@@ -102,6 +113,8 @@ class _MjpegViewState extends State<MjpegView> {
   void didUpdateWidget(covariant MjpegView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.streamUrl != widget.streamUrl) {
+      _hasFirstFrame = false;
+      _failureReported = false;
       _restartStream();
     }
   }
@@ -113,13 +126,31 @@ class _MjpegViewState extends State<MjpegView> {
     _pendingFrame = null;
     _decoding = false;
     _lastError = null;
+    if (!_hasFirstFrame) _armFirstFrameTimeout();
     _startStream();
+  }
+
+  void _armFirstFrameTimeout() {
+    _firstFrameTimer?.cancel();
+    _firstFrameTimer = Timer(widget.initialFrameTimeout, () {
+      if (!_isActive || _hasFirstFrame) return;
+      _notifyStreamFailure('timeout');
+    });
+  }
+
+  void _notifyStreamFailure(String reason) {
+    if (_failureReported) return;
+    _failureReported = true;
+    widget.onStreamFailure?.call(reason);
   }
 
   Future<void> _startStream() async {
     try {
       _client = http.Client();
       final request = http.Request("GET", Uri.parse(widget.streamUrl));
+      if (widget.headers.isNotEmpty) {
+        request.headers.addAll(widget.headers);
+      }
       final response = await _client!.send(request);
 
       final buffer = <int>[];
@@ -133,7 +164,9 @@ class _MjpegViewState extends State<MjpegView> {
 
           buffer.addAll(chunk);
 
-          if (scan > buffer.length - 2) scan = (buffer.length - 2).clamp(0, buffer.length);
+          if (scan > buffer.length - 2) {
+            scan = (buffer.length - 2).clamp(0, buffer.length);
+          }
           while (scan < buffer.length - 1) {
             final b0 = buffer[scan];
             final b1 = buffer[scan + 1];
@@ -173,16 +206,25 @@ class _MjpegViewState extends State<MjpegView> {
         },
         onError: (e) {
           _lastError = e;
+          if (!_hasFirstFrame) {
+            _notifyStreamFailure('error: $e');
+          }
           if (mounted) setState(() {});
           _scheduleReconnect();
         },
         onDone: () {
+          if (!_hasFirstFrame) {
+            _notifyStreamFailure('stream closed');
+          }
           _scheduleReconnect();
         },
         cancelOnError: true,
       );
     } catch (e) {
       _lastError = e;
+      if (!_hasFirstFrame) {
+        _notifyStreamFailure('connect failed: $e');
+      }
       if (mounted) setState(() {});
       _scheduleReconnect();
     }
@@ -197,14 +239,9 @@ class _MjpegViewState extends State<MjpegView> {
   }
 
   void _handleFrame(Uint8List bytes) {
-    if (widget.lowLatency) {
-      _pendingFrame = bytes;
-      if (_decoding) return;
-    } else {
-      if (_decoding) return;
-      _pendingFrame = bytes;
-    }
-
+    // Keep only the newest frame to stay close to live edge.
+    _pendingFrame = bytes;
+    if (_decoding) return;
     _decodePending();
   }
 
@@ -236,6 +273,10 @@ class _MjpegViewState extends State<MjpegView> {
       _lastDecodeMs = sw.elapsedMilliseconds;
       _framesShown++;
       _lastError = null;
+      if (!_hasFirstFrame) {
+        _hasFirstFrame = true;
+        _firstFrameTimer?.cancel();
+      }
       if (mounted) setState(() {});
     } catch (e) {
       _lastError = e;
@@ -244,7 +285,7 @@ class _MjpegViewState extends State<MjpegView> {
       _decoding = false;
     }
 
-    if (widget.lowLatency && _pendingFrame != null && _isActive) {
+    if (_pendingFrame != null && _isActive) {
       _decodePending();
     }
   }
@@ -252,11 +293,16 @@ class _MjpegViewState extends State<MjpegView> {
   @override
   Widget build(BuildContext context) {
     if (_lastError != null && _image == null) {
-      return widget.errorBuilder ?? const Center(child: Text('Ошибка видео-потока', style: TextStyle(color: Colors.grey)));
+      return widget.errorBuilder ??
+          const Center(
+              child: Text('Ошибка видео-потока',
+                  style: TextStyle(color: Colors.grey)));
     }
 
     if (_image == null) {
-      return widget.loadingBuilder ?? const Center(child: CircularProgressIndicator(color: Color(0xFF00FF9D)));
+      return widget.loadingBuilder ??
+          const Center(
+              child: CircularProgressIndicator(color: Color(0xFF00FF9D)));
     }
 
     return RawImage(

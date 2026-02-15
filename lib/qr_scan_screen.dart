@@ -81,7 +81,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
             child: Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
-                color: kPanelColor.withOpacity(0.85),
+                color: kPanelColor.withValues(alpha: 0.85),
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: Colors.white10),
               ),
@@ -101,7 +101,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
 class _QrOverlayPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.black.withOpacity(0.55);
+    final paint = Paint()..color = Colors.black.withValues(alpha: 0.55);
     canvas.drawRect(Offset.zero & size, paint);
 
     final scanSize = (size.shortestSide * 0.62).clamp(220.0, 360.0);
@@ -116,7 +116,7 @@ class _QrOverlayPainter extends CustomPainter {
     canvas.restore();
 
     final border = Paint()
-      ..color = kAccentColor.withOpacity(0.9)
+      ..color = kAccentColor.withValues(alpha: 0.9)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.0;
     canvas.drawRRect(RRect.fromRectXY(rect, 18, 18), border);

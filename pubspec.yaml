@@ -9,15 +9,19 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   
   # Network & API
   http: ^1.6.0
   web_socket_channel: ^3.0.3
+  dio: ^5.9.0
   
   # Local Storage
   shared_preferences: ^2.5.4
   
   # Fonts
+  intl: any
   google_fonts: ^7.1.0
 
   path_provider: ^2.1.2
@@ -27,6 +31,9 @@ dependencies:
   device_info_plus: ^12.3.0
   url_launcher: ^6.3.2
   mobile_scanner: ^7.1.4
+  flutter_vlc_player: ^7.4.4
+  flutter_secure_storage: ^9.2.4
+  crypto: ^3.0.6
 
 dev_dependencies:
   flutter_test:
@@ -38,6 +45,7 @@ dev_dependencies:
 # following page: https://dart.dev/tools/pub/pubspec
 
 flutter:
+  generate: true
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.
