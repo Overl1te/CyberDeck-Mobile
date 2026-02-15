@@ -1,19 +1,65 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'security/token_store.dart';
+
 class SavedDevice {
   final String id;
   final String name;
   final String ip;
   final String token;
   final int port;
+  final String scheme;
 
-  SavedDevice({required this.id, required this.name, required this.ip, required this.token, required this.port});
+  SavedDevice({
+    required this.id,
+    required this.name,
+    required this.ip,
+    required this.token,
+    required this.port,
+    this.scheme = 'http',
+  });
 
-  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'ip': ip, 'token': token, 'port': port};
+  SavedDevice copyWith({
+    String? id,
+    String? name,
+    String? ip,
+    String? token,
+    int? port,
+    String? scheme,
+  }) {
+    return SavedDevice(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      ip: ip ?? this.ip,
+      token: token ?? this.token,
+      port: port ?? this.port,
+      scheme: scheme ?? this.scheme,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'ip': ip,
+        'port': port,
+        'scheme': scheme,
+      };
+
   factory SavedDevice.fromJson(Map<String, dynamic> json) => SavedDevice(
-    id: json['id'], name: json['name'], ip: json['ip'], token: json['token'], port: json['port']
-  );
+        id: json['id']?.toString() ?? '',
+        name: json['name']?.toString() ?? 'Unknown PC',
+        ip: json['ip']?.toString() ?? '',
+        token: json['token']?.toString() ?? '',
+        port: (json['port'] as num?)?.toInt() ?? 8080,
+        scheme: _normalizeScheme(json['scheme']?.toString()),
+      );
+
+  static String _normalizeScheme(String? raw) {
+    final value = (raw ?? '').trim().toLowerCase();
+    if (value == 'https') return 'https';
+    return 'http';
+  }
 }
 
 class AppSettings {
@@ -25,7 +71,8 @@ class AppSettings {
     required this.autoScanOnConnect,
   });
 
-  factory AppSettings.defaults() => const AppSettings(defaultPort: 8080, autoScanOnConnect: true);
+  factory AppSettings.defaults() =>
+      const AppSettings(defaultPort: 8080, autoScanOnConnect: true);
 
   AppSettings copyWith({int? defaultPort, bool? autoScanOnConnect}) {
     return AppSettings(
@@ -159,30 +206,75 @@ class DeviceStorage {
     final prefs = await SharedPreferences.getInstance();
     final String? data = prefs.getString(_key);
     if (data == null) return [];
-    return (jsonDecode(data) as List).map((e) => SavedDevice.fromJson(e)).toList();
+
+    List<dynamic> rawList;
+    try {
+      rawList = jsonDecode(data) as List<dynamic>;
+    } catch (_) {
+      return [];
+    }
+
+    final devices = <SavedDevice>[];
+    for (final raw in rawList) {
+      if (raw is! Map) continue;
+      final parsed = SavedDevice.fromJson(Map<String, dynamic>.from(raw));
+      if (parsed.id.isEmpty || parsed.ip.isEmpty) continue;
+
+      final secureToken = await TokenStore.readToken(parsed.id);
+      if (secureToken != null && secureToken.isNotEmpty) {
+        devices.add(parsed.copyWith(token: secureToken));
+        continue;
+      }
+
+      if (parsed.token.isNotEmpty) {
+        await TokenStore.saveToken(parsed.id, parsed.token);
+      }
+      devices.add(parsed);
+    }
+
+    return devices;
   }
 
   static Future<void> saveDevice(SavedDevice device) async {
     final devices = await getDevices();
-    devices.removeWhere((d) => d.ip == device.ip);
-    devices.insert(0, device);
-    
+    devices.removeWhere(
+      (d) =>
+          d.ip == device.ip &&
+          d.port == device.port &&
+          d.scheme == device.scheme,
+    );
+    devices.insert(0, device.copyWith(token: ''));
+
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, jsonEncode(devices.map((e) => e.toJson()).toList()));
+    await prefs.setString(
+        _key, jsonEncode(devices.map((e) => e.toJson()).toList()));
+    await TokenStore.saveToken(device.id, device.token);
   }
-  
+
   static Future<void> removeDeviceById(String id) async {
     final devices = await getDevices();
     devices.removeWhere((d) => d.id == id);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, jsonEncode(devices.map((e) => e.toJson()).toList()));
+    await prefs.setString(
+        _key, jsonEncode(devices.map((e) => e.toJson()).toList()));
+    await prefs.remove('$_deviceSettingsPrefix$id');
+    await TokenStore.deleteToken(id);
   }
 
   static Future<void> removeDeviceByIp(String ip) async {
     final devices = await getDevices();
+    final removedIds = devices
+        .where((d) => d.ip == ip)
+        .map((d) => d.id)
+        .toList(growable: false);
     devices.removeWhere((d) => d.ip == ip);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, jsonEncode(devices.map((e) => e.toJson()).toList()));
+    await prefs.setString(
+        _key, jsonEncode(devices.map((e) => e.toJson()).toList()));
+    for (final id in removedIds) {
+      await prefs.remove('$_deviceSettingsPrefix$id');
+      await TokenStore.deleteToken(id);
+    }
   }
 
   static Future<AppSettings> getAppSettings() async {
@@ -212,8 +304,10 @@ class DeviceStorage {
     }
   }
 
-  static Future<void> saveDeviceSettings(String deviceId, DeviceSettings settings) async {
+  static Future<void> saveDeviceSettings(
+      String deviceId, DeviceSettings settings) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('$_deviceSettingsPrefix$deviceId', jsonEncode(settings.toJson()));
+    await prefs.setString(
+        '$_deviceSettingsPrefix$deviceId', jsonEncode(settings.toJson()));
   }
 }

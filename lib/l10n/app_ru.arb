@@ -1,0 +1,91 @@
+﻿{
+  "@@locale": "ru",
+  "appTitle": "CyberDeck",
+  "newConnection": "НОВОЕ ПОДКЛЮЧЕНИЕ",
+  "ipHint": "IP или хост (например 192.168.1.5 или 192.168.1.5:8080)",
+  "pairingCodeHint": "КОД ПАРЫ",
+  "connect": "ПОДКЛЮЧИТЬ",
+  "scanQr": "СКАНИРОВАТЬ QR",
+  "openingCamera": "ОТКРЫВАЮ КАМЕРУ...",
+  "scanNetwork": "СКАНИРОВАТЬ СЕТЬ",
+  "scanning": "СКАНИРУЮ...",
+  "discoveredDevices": "Найденные устройства:",
+  "vpnWarningTitle": "Предупреждение VPN",
+  "vpnWarningBody": "Активный VPN может блокировать подключение к CyberDeck по локальной сети. Отключите VPN или разрешите доступ к локальной сети (LAN).",
+  "enterIpAndCode": "Введите IP и код пары",
+  "connectionError": "Ошибка подключения: {error}",
+  "@connectionError": {
+    "placeholders": {
+      "error": {}
+    }
+  },
+  "qrNotRecognized": "QR не распознан",
+  "qrLoginNotSupported": "QR-вход не поддерживается сервером",
+  "qrTokenInvalidOrExpired": "QR-токен недействителен или устарел",
+  "qrFallbackToHandshake": "QR-вход недоступен. Перехожу к подключению по PIN-коду.",
+  "tlsInsecureWarning": "TLS-соединение небезопасно или использует самоподписанный сертификат. Проверьте настройки сертификата на сервере.",
+  "invalidResponseMissingToken": "Некорректный ответ: отсутствует токен",
+  "invalidHostOrPort": "Некорректный хост или порт",
+  "couldNotConnect": "Не удалось подключиться. Проверьте код, хост и порт.",
+  "checking": "ПРОВЕРКА...",
+  "online": "В СЕТИ",
+  "offline": "НЕ В СЕТИ",
+  "touchpad": "ТАЧПАД",
+  "sendFileToPc": "Отправить файл на ПК",
+  "power": "Питание",
+  "deviceSettings": "Настройки устройства",
+  "uploading": "Загрузка...",
+  "fileUploaded": "Файл отправлен!",
+  "uploadError": "Ошибка отправки: {error}",
+  "@uploadError": {
+    "placeholders": {
+      "error": {}
+    }
+  },
+  "uploadChecksumMismatch": "Ошибка отправки: не совпала контрольная сумма",
+  "incomingFile": "Входящий файл",
+  "acceptFile": "Принять: {filename}",
+  "@acceptFile": {
+    "placeholders": {
+      "filename": {}
+    }
+  },
+  "sizeMb": "{size} МБ",
+  "@sizeMb": {
+    "placeholders": {
+      "size": {}
+    }
+  },
+  "no": "Нет",
+  "download": "Скачать",
+  "invalidTransferPayload": "Некорректные данные передачи файла (нет ссылки)",
+  "invalidDownloadUrl": "Некорректная ссылка для скачивания",
+  "noStoragePermissionOpeningBrowser": "Нет прав на память. Открываю браузер...",
+  "noStoragePermission": "Нет прав на доступ к памяти",
+  "downloading": "Скачивание...",
+  "savedFile": "Сохранено: {filename}",
+  "@savedFile": {
+    "placeholders": {
+      "filename": {}
+    }
+  },
+  "downloadErrorOpeningBrowser": "Ошибка скачивания: {error}. Открываю браузер...",
+  "@downloadErrorOpeningBrowser": {
+    "placeholders": {
+      "error": {}
+    }
+  },
+  "downloadError": "Ошибка скачивания: {error}",
+  "@downloadError": {
+    "placeholders": {
+      "error": {}
+    }
+  },
+  "cancel": "Отмена",
+  "uploadInProgress": "Идет отправка файла",
+  "downloadInProgress": "Идет скачивание файла",
+  "powerTitle": "Питание",
+  "shutdown": "Выключить",
+  "lock": "Блокировка",
+  "sleepNotImplemented": "Режим сна пока не реализован на сервере ПК."
+}
