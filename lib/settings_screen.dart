@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
+import 'app_version.dart';
 import 'device_storage.dart';
+import 'services/update_check_service.dart';
 import 'theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -12,8 +14,11 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _loading = true;
+  bool _checkingUpdates = false;
   late AppSettings _s;
   late TextEditingController _port;
+  final UpdateCheckService _updateCheckService = UpdateCheckService();
+  UpdateCheckResult? _updateResult;
 
   @override
   void initState() {
@@ -33,6 +38,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    _updateCheckService.dispose();
     if (!_loading) _port.dispose();
     super.dispose();
   }
@@ -43,7 +49,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final updated = _s.copyWith(defaultPort: fixedPort);
     await DeviceStorage.saveAppSettings(updated);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e'), backgroundColor: Colors.green));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e'),
+        backgroundColor: Colors.green));
+  }
+
+  Future<void> _checkUpdates() async {
+    if (_checkingUpdates) return;
+    setState(() => _checkingUpdates = true);
+    final result = await _updateCheckService.checkLatestTags();
+    if (!mounted) return;
+    setState(() {
+      _checkingUpdates = false;
+      _updateResult = result;
+    });
+  }
+
+  Widget _updateLine(String title, ReleaseChannelStatus status) {
+    final hasError = status.error.isNotEmpty;
+    final hasUpdate = status.hasUpdate;
+    final color = hasError
+        ? Colors.orangeAccent
+        : hasUpdate
+            ? Colors.amberAccent
+            : Colors.grey;
+    final text = hasError
+        ? '$title: error ${status.error}'
+        : hasUpdate
+            ? '$title: ${status.currentVersion} -> ${status.latestTag}'
+            : '$title: ${status.currentVersion} (up to date)';
+    return Text(text, style: TextStyle(color: color, fontSize: 12));
   }
 
   @override
@@ -52,9 +87,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       backgroundColor: kBgColor,
       appBar: AppBar(
         backgroundColor: kBgColor,
-        title: const Text('\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438'),
+        title: const Text(
+            '\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438'),
         actions: [
-          IconButton(icon: const Icon(Icons.save), onPressed: _loading ? null : _save),
+          IconButton(
+              icon: const Icon(Icons.save), onPressed: _loading ? null : _save),
         ],
       ),
       body: _loading
@@ -62,28 +99,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                _section('\u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435'),
+                _section(
+                    '\u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435'),
                 _card(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('\u041f\u043e\u0440\u0442 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e', style: TextStyle(color: Colors.grey)),
+                      const Text(
+                          '\u041f\u043e\u0440\u0442 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e',
+                          style: TextStyle(color: Colors.grey)),
                       const SizedBox(height: 8),
                       TextField(
                         controller: _port,
                         keyboardType: TextInputType.number,
-                        style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+                        style: const TextStyle(
+                            color: Colors.white, fontFamily: 'monospace'),
                         decoration: InputDecoration(
                           filled: true,
                           fillColor: const Color(0xFF111111),
                           hintText: '8080',
                           hintStyle: TextStyle(color: Colors.grey[700]),
-                          enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.grey[800]!)),
-                          focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: kAccentColor)),
+                          enabledBorder: OutlineInputBorder(
+                              borderSide: BorderSide(color: Colors.grey[800]!)),
+                          focusedBorder: const OutlineInputBorder(
+                              borderSide: BorderSide(color: kAccentColor)),
                         ),
                         onChanged: (_) {
                           final port = int.tryParse(_port.text.trim());
-                          setState(() => _s = _s.copyWith(defaultPort: port ?? _s.defaultPort));
+                          setState(() => _s =
+                              _s.copyWith(defaultPort: port ?? _s.defaultPort));
                         },
                       ),
                       const SizedBox(height: 10),
@@ -94,33 +138,104 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       const SizedBox(height: 10),
                       SwitchListTile(
                         value: _s.autoScanOnConnect,
-                        onChanged: (v) => setState(() => _s = _s.copyWith(autoScanOnConnect: v)),
-                        title: const Text('\u0410\u0432\u0442\u043e\u0441\u043a\u0430\u043d \u0432 \u044d\u043a\u0440\u0430\u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f'),
-                        subtitle: const Text('\u041f\u0440\u043e\u0431\u043e\u0432\u0430\u0442\u044c \u043d\u0430\u0439\u0442\u0438 \u041f\u041a \u0432 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u0441\u0435\u0442\u0438', style: TextStyle(color: Colors.grey)),
+                        onChanged: (v) => setState(
+                            () => _s = _s.copyWith(autoScanOnConnect: v)),
+                        title: const Text(
+                            '\u0410\u0432\u0442\u043e\u0441\u043a\u0430\u043d \u0432 \u044d\u043a\u0440\u0430\u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f'),
+                        subtitle: const Text(
+                            '\u041f\u0440\u043e\u0431\u043e\u0432\u0430\u0442\u044c \u043d\u0430\u0439\u0442\u0438 \u041f\u041a \u0432 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u0441\u0435\u0442\u0438',
+                            style: TextStyle(color: Colors.grey)),
+                        activeThumbColor: kAccentColor,
+                      ),
+                      SwitchListTile(
+                        value: _s.debugMode,
+                        onChanged: (v) =>
+                            setState(() => _s = _s.copyWith(debugMode: v)),
+                        title: const Text('Режим отладки'),
+                        subtitle: const Text(
+                          'Показывать Diagnostics и расширенные метрики',
+                          style: TextStyle(color: Colors.grey),
+                        ),
                         activeThumbColor: kAccentColor,
                       ),
                     ],
                   ),
                 ),
-
                 const SizedBox(height: 18),
-                _section('\u041e \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0438'),
+                _section(
+                    '\u041e \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0438'),
                 _card(
-                  child: const ListTile(
-                    leading: Icon(Icons.memory, color: kAccentColor),
-                    title: Text('CyberDeck Mobile'),
-                    subtitle: Text('\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0445\u0440\u0430\u043d\u044f\u0442\u0441\u044f \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430', style: TextStyle(color: Colors.grey)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.memory, color: kAccentColor),
+                        title: Text('CyberDeck Mobile'),
+                        subtitle: Text(
+                          '\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0445\u0440\u0430\u043d\u044f\u0442\u0441\u044f \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ),
+                      const Text(
+                        'Mobile version: $kMobileAppVersion',
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Recommended server: $kCyberDeckServerVersion',
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        height: 40,
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF141414),
+                            foregroundColor: Colors.white,
+                            side: const BorderSide(color: Color(0xFF2D2D2D)),
+                          ),
+                          onPressed: _checkingUpdates ? null : _checkUpdates,
+                          icon: _checkingUpdates
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Icon(Icons.system_update_alt),
+                          label: Text(_checkingUpdates
+                              ? '\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430...'
+                              : '\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f'),
+                        ),
+                      ),
+                      if (_updateResult != null) ...[
+                        const SizedBox(height: 10),
+                        _updateLine('Server', _updateResult!.server),
+                        const SizedBox(height: 4),
+                        _updateLine('Mobile', _updateResult!.mobile),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Checked at ${_updateResult!.checkedAt.hour.toString().padLeft(2, '0')}:${_updateResult!.checkedAt.minute.toString().padLeft(2, '0')}:${_updateResult!.checkedAt.second.toString().padLeft(2, '0')}',
+                          style:
+                              const TextStyle(color: Colors.grey, fontSize: 11),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
-
                 const SizedBox(height: 18),
                 SizedBox(
                   height: 52,
                   child: ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(backgroundColor: kAccentColor, foregroundColor: Colors.black),
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: kAccentColor,
+                        foregroundColor: Colors.black),
                     onPressed: _save,
                     icon: const Icon(Icons.save),
-                    label: const Text('\u0421\u041e\u0425\u0420\u0410\u041d\u0418\u0422\u042c', style: TextStyle(fontWeight: FontWeight.bold)),
+                    label: const Text(
+                        '\u0421\u041e\u0425\u0420\u0410\u041d\u0418\u0422\u042c',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
                   ),
                 ),
               ],
@@ -130,7 +245,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _section(String title) => Padding(
         padding: const EdgeInsets.only(left: 6, bottom: 8),
-        child: Text(title.toUpperCase(), style: const TextStyle(color: kAccentColor, fontWeight: FontWeight.bold, letterSpacing: 1)),
+        child: Text(title.toUpperCase(),
+            style: const TextStyle(
+                color: kAccentColor,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1)),
       );
 
   Widget _card({required Widget child}) => Container(

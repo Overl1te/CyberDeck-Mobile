@@ -8,6 +8,9 @@ import 'package:http/http.dart' as http;
 @immutable
 class MjpegViewStats {
   final double fps;
+  final double renderFps;
+  final double uniqueFps;
+  final double duplicateRatio;
   final double kbps;
   final int lastFrameBytes;
   final int lastDecodeMs;
@@ -16,6 +19,9 @@ class MjpegViewStats {
 
   const MjpegViewStats({
     required this.fps,
+    required this.renderFps,
+    required this.uniqueFps,
+    required this.duplicateRatio,
     required this.kbps,
     required this.lastFrameBytes,
     required this.lastDecodeMs,
@@ -62,14 +68,20 @@ class _MjpegViewState extends State<MjpegView> {
 
   bool _decoding = false;
   Uint8List? _pendingFrame;
+  int? _pendingFingerprint;
   Object? _lastError;
 
-  int _framesShown = 0;
+  int _framesReceived = 0;
+  int _framesRendered = 0;
+  int _framesUnique = 0;
+  int _framesDuplicate = 0;
   int _bytesInWindow = 0;
   int _lastFrameBytes = 0;
   int _lastDecodeMs = 0;
   int _imageWidth = 0;
   int _imageHeight = 0;
+  int? _lastIncomingFingerprint;
+  int? _lastDecodedFingerprint;
   Timer? _statsTimer;
   Timer? _firstFrameTimer;
   bool _hasFirstFrame = false;
@@ -81,13 +93,24 @@ class _MjpegViewState extends State<MjpegView> {
     _armFirstFrameTimeout();
     _startStream();
     _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      final fps = _framesShown.toDouble();
+      final fps = _framesReceived.toDouble();
+      final renderFps = _framesRendered.toDouble();
+      final uniqueFps = _framesUnique.toDouble();
+      final duplicateRatio = _framesReceived <= 0
+          ? 0.0
+          : _framesDuplicate.toDouble() / _framesReceived.toDouble();
       final kbps = (_bytesInWindow * 8) / 1000.0;
-      _framesShown = 0;
+      _framesReceived = 0;
+      _framesRendered = 0;
+      _framesUnique = 0;
+      _framesDuplicate = 0;
       _bytesInWindow = 0;
       widget.onStats?.call(
         MjpegViewStats(
           fps: fps,
+          renderFps: renderFps,
+          uniqueFps: uniqueFps,
+          duplicateRatio: duplicateRatio,
           kbps: kbps,
           lastFrameBytes: _lastFrameBytes,
           lastDecodeMs: _lastDecodeMs,
@@ -124,8 +147,15 @@ class _MjpegViewState extends State<MjpegView> {
     _client?.close();
     _client = null;
     _pendingFrame = null;
+    _pendingFingerprint = null;
     _decoding = false;
     _lastError = null;
+    _lastIncomingFingerprint = null;
+    _lastDecodedFingerprint = null;
+    _framesReceived = 0;
+    _framesRendered = 0;
+    _framesUnique = 0;
+    _framesDuplicate = 0;
     if (!_hasFirstFrame) _armFirstFrameTimeout();
     _startStream();
   }
@@ -239,17 +269,38 @@ class _MjpegViewState extends State<MjpegView> {
   }
 
   void _handleFrame(Uint8List bytes) {
+    _framesReceived++;
+    final fingerprint = _frameFingerprint(bytes);
+    if (_lastIncomingFingerprint == null ||
+        _lastIncomingFingerprint != fingerprint) {
+      _framesUnique++;
+    } else {
+      _framesDuplicate++;
+    }
+    _lastIncomingFingerprint = fingerprint;
+
+    // Skip decoding exact duplicate of the currently displayed frame.
+    if (_image != null && _lastDecodedFingerprint == fingerprint) {
+      return;
+    }
+    if (_pendingFingerprint == fingerprint) {
+      return;
+    }
+
     // Keep only the newest frame to stay close to live edge.
     _pendingFrame = bytes;
+    _pendingFingerprint = fingerprint;
     if (_decoding) return;
     _decodePending();
   }
 
   Future<void> _decodePending() async {
     final bytes = _pendingFrame;
+    final fingerprint = _pendingFingerprint;
     if (bytes == null) return;
 
     _pendingFrame = null;
+    _pendingFingerprint = null;
     _decoding = true;
 
     final sw = Stopwatch()..start();
@@ -270,8 +321,9 @@ class _MjpegViewState extends State<MjpegView> {
         _imageHeight = ih;
         widget.onImageSize?.call(Size(iw.toDouble(), ih.toDouble()));
       }
+      _lastDecodedFingerprint = fingerprint ?? _frameFingerprint(bytes);
       _lastDecodeMs = sw.elapsedMilliseconds;
-      _framesShown++;
+      _framesRendered++;
       _lastError = null;
       if (!_hasFirstFrame) {
         _hasFirstFrame = true;
@@ -288,6 +340,19 @@ class _MjpegViewState extends State<MjpegView> {
     if (_pendingFrame != null && _isActive) {
       _decodePending();
     }
+  }
+
+  int _frameFingerprint(Uint8List bytes) {
+    if (bytes.isEmpty) return 0;
+    var hash = 0x811C9DC5;
+    final len = bytes.length;
+    final step = ((len ~/ 64).clamp(1, 4096)).toInt();
+    for (var i = 0; i < len; i += step) {
+      hash ^= bytes[i];
+      hash = (hash * 0x01000193) & 0xFFFFFFFF;
+    }
+    hash ^= len;
+    return hash & 0x7FFFFFFF;
   }
 
   @override

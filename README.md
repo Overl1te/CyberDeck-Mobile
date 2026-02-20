@@ -89,6 +89,7 @@ flutter run
 
 ```bash
 flutter build apk --release
+flutter build apk --split-per-abi
 ```
 
 Файл будет находиться в: `build/app/outputs/flutter-apk/app-release.apk`
@@ -223,3 +224,14 @@ pubspec.yaml            # Зависимости (http, google_fonts, shared_pre
    - Trigger file transfer with `accept_ranges=true`.
    - Interrupt network mid-download, restore network -> download resumes.
    - Force checksum mismatch -> app retries and reports final success/failure correctly.
+
+---
+
+## Release & Update Check
+
+- Mobile app version: `1.1.1`
+- Recommended CyberDeck server/launcher version: `1.3.1`
+- Mobile settings screen now includes a GitHub release check against:
+  - `https://api.github.com/repos/Overl1te/CyberDeck/releases/latest`
+  - `https://api.github.com/repos/Overl1te/CyberDeck-Mobile/releases/latest`
+

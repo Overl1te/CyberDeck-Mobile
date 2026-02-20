@@ -1,3 +1,5 @@
+// ignore_for_file: unnecessary_cast
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -60,6 +62,7 @@ class _ControlScreenState extends State<ControlScreen> {
   double _apiRttMs = 0;
 
   DeviceSettings _settings = DeviceSettings.defaults();
+  bool _debugModeEnabled = false;
   double _sensitivity = 2.0;
   double _scrollFactor = 3.0;
 
@@ -79,17 +82,21 @@ class _ControlScreenState extends State<ControlScreen> {
   final TextEditingController _msgController = TextEditingController();
 
   double _streamFps = 0;
+  double _streamRenderFps = 0;
+  double _streamUniqueFps = 0;
+  double _streamDuplicateRatio = 0;
   double _streamKbps = 0;
   int _lastFrameKb = 0;
   int _lastDecodeMs = 0;
 
-  static const Size _cursorSize = Size(16, 16);
+  static const Size _cursorSize = Size(10, 10);
   Size _videoSize = Size.zero;
+  Size _touchSurfaceSize = Size.zero;
   Size _frameSize = Size.zero;
   Offset _cursor = Offset.zero;
   bool _cursorInit = false;
 
-  static const Duration _streamOfferTimeout = Duration(seconds: 5);
+  static const Duration _streamOfferTimeout = Duration(seconds: 3);
   List<_StreamCandidate> _streamCandidates = const <_StreamCandidate>[];
   int _activeStreamCandidate = -1;
   int _streamWidgetNonce = 0;
@@ -102,7 +109,7 @@ class _ControlScreenState extends State<ControlScreen> {
   Timer? _streamReconnectTimer;
   bool _candidateReady = false;
   StreamFallbackPolicy _fallbackPolicy =
-      const StreamFallbackPolicy(candidateTimeoutMs: 1600, stallSeconds: 5);
+      const StreamFallbackPolicy(candidateTimeoutMs: 2800, stallSeconds: 8);
 
   Timer? _stallTimer;
   int _stallZeroFpsSeconds = 0;
@@ -131,6 +138,11 @@ class _ControlScreenState extends State<ControlScreen> {
   Map<String, dynamic>? _lastStreamOfferPayload;
   String _preferredCandidateSignature = '';
   int _streamReconnectHintMs = 1200;
+  int _candidateStartupRetries = 0;
+  static const int _maxCandidateStartupRetries = 1;
+  int _candidateReadyAtMs = 0;
+  final Map<String, int> _candidateFailureCount = <String, int>{};
+  String _lastReadyCandidateSignature = '';
 
   @override
   void initState() {
@@ -218,9 +230,11 @@ class _ControlScreenState extends State<ControlScreen> {
 
   Future<void> _loadSettings() async {
     final s = await DeviceStorage.getDeviceSettings(widget.deviceId);
+    final appSettings = await DeviceStorage.getAppSettings();
     if (!mounted) return;
     setState(() {
       _settings = s;
+      _debugModeEnabled = appSettings.debugMode;
       _sensitivity = s.touchSensitivity;
       _scrollFactor = s.scrollFactor;
       _adaptiveParams = _AdaptiveStreamParams(
@@ -340,6 +354,70 @@ class _ControlScreenState extends State<ControlScreen> {
     _send({'type': 'key', 'key': key});
   }
 
+  bool get _isTabletControlMode => _settings.controlMode == 'tablet';
+
+  Size _displayFrameSize() {
+    if (_frameSize.width <= 0 || _frameSize.height <= 0) {
+      return _frameSize;
+    }
+    if ((_rot % 180) != 0) {
+      return Size(_frameSize.height, _frameSize.width);
+    }
+    return _frameSize;
+  }
+
+  Rect _computeTabletTouchRect() {
+    final outputSize = _touchSurfaceSize;
+    if (outputSize.width <= 0 || outputSize.height <= 0) {
+      return Rect.zero;
+    }
+    final displayFrame = _displayFrameSize();
+    if (displayFrame.width <= 0 || displayFrame.height <= 0) {
+      return Offset.zero & outputSize;
+    }
+    final fitted = applyBoxFit(BoxFit.contain, displayFrame, outputSize);
+    return Alignment.center
+        .inscribe(fitted.destination, Offset.zero & outputSize);
+  }
+
+  Offset? _normalizedPointerFromSurface(Offset position) {
+    final rect = _computeTabletTouchRect();
+    if (rect.isEmpty || rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    final dx = ((position.dx - rect.left) / rect.width).clamp(0.0, 1.0);
+    final dy = ((position.dy - rect.top) / rect.height).clamp(0.0, 1.0);
+
+    switch (_rot % 360) {
+      case 90:
+        return Offset(dy, 1.0 - dx);
+      case 180:
+        return Offset(1.0 - dx, 1.0 - dy);
+      case 270:
+        return Offset(1.0 - dy, dx);
+      default:
+        return Offset(dx, dy);
+    }
+  }
+
+  void _sendAbsoluteMoveForPosition(Offset position) {
+    final normalized = _normalizedPointerFromSurface(position);
+    if (normalized == null) return;
+    _send({'type': 'move_abs', 'x': normalized.dx, 'y': normalized.dy});
+  }
+
+  Future<void> _setControlMode(String mode) async {
+    final normalized = mode == 'tablet' ? 'tablet' : 'touchpad';
+    if (_settings.controlMode == normalized) return;
+    final updated = _settings.copyWith(controlMode: normalized);
+    if (mounted) {
+      setState(() => _settings = updated);
+    } else {
+      _settings = updated;
+    }
+    await DeviceStorage.saveDeviceSettings(widget.deviceId, updated);
+  }
+
   void _handlePointerMove(PointerMoveEvent e) {
     if (_showKeyboard) return;
 
@@ -385,15 +463,26 @@ class _ControlScreenState extends State<ControlScreen> {
         _send({'type': 'drag_s'});
       }
       if (_isDragging) {
+        if (_isTabletControlMode) {
+          _sendAbsoluteMoveForPosition(e.position);
+        } else {
+          _send({
+            'type': 'move',
+            'dx': sdx * _sensitivity,
+            'dy': sdy * _sensitivity,
+          });
+        }
+      }
+    } else if (_pointerCount == 1) {
+      if (_isTabletControlMode) {
+        _sendAbsoluteMoveForPosition(e.position);
+      } else {
         _send({
           'type': 'move',
           'dx': sdx * _sensitivity,
-          'dy': sdy * _sensitivity
+          'dy': sdy * _sensitivity,
         });
       }
-    } else if (_pointerCount == 1) {
-      _send(
-          {'type': 'move', 'dx': sdx * _sensitivity, 'dy': sdy * _sensitivity});
     }
 
     _lastX = e.position.dx;
@@ -411,6 +500,9 @@ class _ControlScreenState extends State<ControlScreen> {
       _lastY = e.position.dy;
       _hasMoved = false;
       _isDragging = false;
+      if (_isTabletControlMode) {
+        _sendAbsoluteMoveForPosition(e.position);
+      }
     }
 
     if (_pointerCount == 1 &&
@@ -469,20 +561,27 @@ class _ControlScreenState extends State<ControlScreen> {
 
     final nx = (x / w).clamp(0.0, 1.0);
     final ny = (y / h).clamp(0.0, 1.0);
-    final left = rect.left + rect.width * nx;
-    final top = rect.top + rect.height * ny;
-    final clampedLeft = left.clamp(rect.left, rect.right - _cursorSize.width);
-    final clampedTop = top.clamp(rect.top, rect.bottom - _cursorSize.height);
+    final cursorX = rect.left + rect.width * nx;
+    final cursorY = rect.top + rect.height * ny;
+    final halfW = _cursorSize.width / 2;
+    final halfH = _cursorSize.height / 2;
+    final minX = rect.left + halfW;
+    final maxX = rect.right - halfW;
+    final minY = rect.top + halfH;
+    final maxY = rect.bottom - halfH;
+    if (maxX <= minX || maxY <= minY) return;
+    final clampedX = cursorX.clamp(minX, maxX).toDouble();
+    final clampedY = cursorY.clamp(minY, maxY).toDouble();
 
     if (mounted) {
       setState(() {
-        _cursor = Offset(clampedLeft, clampedTop);
+        _cursor = Offset(clampedX, clampedY);
         _cursorInit = true;
       });
     }
   }
 
-  int get _offerMaxWidth => max(960, min(1280, _settings.streamMaxWidth));
+  int get _offerMaxWidth => max(640, min(3840, _settings.streamMaxWidth));
 
   _StreamCandidate? get _currentStreamCandidate {
     if (_activeStreamCandidate < 0 ||
@@ -504,7 +603,7 @@ class _ControlScreenState extends State<ControlScreen> {
         'quality': quality.toString(),
         'fps': fps.toString(),
         'cursor': '0',
-        'low_latency': '1',
+        'low_latency': _settings.lowLatency ? '1' : '0',
       },
     );
   }
@@ -539,34 +638,44 @@ class _ControlScreenState extends State<ControlScreen> {
   List<_StreamCandidate> _prioritizeCandidates(List<_StreamCandidate> input) {
     if (input.length < 2) return input;
 
-    final hasMpegTs = input.any((c) => c.transport == _StreamTransport.mpegTs);
-    final orderedByTransport = hasMpegTs
-        ? <_StreamCandidate>[
-            ...input.where((c) => c.transport == _StreamTransport.mpegTs),
-            ...input.where((c) => c.transport != _StreamTransport.mpegTs),
-          ]
-        : input;
+    final withFailures = List<_StreamCandidate>.from(input)
+      ..sort((a, b) {
+        final fa = _candidateFailureCount[a.signature] ?? 0;
+        final fb = _candidateFailureCount[b.signature] ?? 0;
+        if (fa != fb) return fa.compareTo(fb);
+        final ta = a.transport == _StreamTransport.mpegTs ? 0 : 1;
+        final tb = b.transport == _StreamTransport.mpegTs ? 0 : 1;
+        return ta.compareTo(tb);
+      });
 
-    if (_preferredCandidateSignature.isEmpty) {
-      return orderedByTransport;
-    }
+    final hasHealthyMpegTs = withFailures.any(
+      (c) =>
+          c.transport == _StreamTransport.mpegTs &&
+          (_candidateFailureCount[c.signature] ?? 0) < 2,
+    );
 
-    final idx = orderedByTransport
-        .indexWhere((c) => c.signature == _preferredCandidateSignature);
-    if (idx <= 0) return orderedByTransport;
+    final preferredSignature = _lastReadyCandidateSignature.isNotEmpty
+        ? _lastReadyCandidateSignature
+        : _preferredCandidateSignature;
+    if (preferredSignature.isEmpty) return withFailures;
 
-    final preferred = orderedByTransport[idx];
-    if (hasMpegTs && preferred.transport != _StreamTransport.mpegTs) {
-      _log(
-        'preferred MJPEG ignored because MPEG-TS is available: ${preferred.signature}',
-      );
-      return orderedByTransport;
+    final idx =
+        withFailures.indexWhere((c) => c.signature == preferredSignature);
+    if (idx <= 0) return withFailures;
+
+    final preferred = withFailures[idx];
+    final preferredFailures = _candidateFailureCount[preferred.signature] ?? 0;
+    if (preferredFailures >= 3) return withFailures;
+
+    // Prefer last known-good candidate first to minimize startup latency.
+    if (hasHealthyMpegTs && preferred.transport != _StreamTransport.mpegTs) {
+      _log('prefer last ready candidate over TS for faster startup');
     }
 
     final out = <_StreamCandidate>[preferred];
-    for (var i = 0; i < orderedByTransport.length; i++) {
+    for (var i = 0; i < withFailures.length; i++) {
       if (i == idx) continue;
-      out.add(orderedByTransport[i]);
+      out.add(withFailures[i]);
     }
     _log('preferred candidate moved to first: ${preferred.signature}');
     return out;
@@ -574,6 +683,9 @@ class _ControlScreenState extends State<ControlScreen> {
 
   void _resetStreamMetrics() {
     _streamFps = 0;
+    _streamRenderFps = 0;
+    _streamUniqueFps = 0;
+    _streamDuplicateRatio = 0;
     _streamKbps = 0;
     _lastFrameKb = 0;
     _lastDecodeMs = 0;
@@ -593,6 +705,8 @@ class _ControlScreenState extends State<ControlScreen> {
         _streamStatus = reason;
         _streamCandidates = const <_StreamCandidate>[];
         _activeStreamCandidate = -1;
+        _candidateStartupRetries = 0;
+        _candidateReadyAtMs = 0;
         _streamWidgetNonce++;
         _resetStreamMetrics();
       });
@@ -605,7 +719,8 @@ class _ControlScreenState extends State<ControlScreen> {
       final response = await _apiClient.get(
         '/api/stream_offer',
         queryParameters: <String, String>{
-          'low_latency': '1',
+          'low_latency': _settings.lowLatency ? '1' : '0',
+          'audio': '1',
           'max_w': _adaptiveParams.maxWidth.toString(),
           'quality': _adaptiveParams.quality.toString(),
           'fps': _adaptiveParams.fps.toString(),
@@ -623,6 +738,7 @@ class _ControlScreenState extends State<ControlScreen> {
           maxWidth: _adaptiveParams.maxWidth,
           quality: _adaptiveParams.quality,
           fps: _adaptiveParams.fps,
+          lowLatency: _settings.lowLatency,
         );
         _lastStreamOfferPayload = offer.raw;
         _fallbackPolicy = offer.fallbackPolicy;
@@ -630,6 +746,14 @@ class _ControlScreenState extends State<ControlScreen> {
         _applyAdaptiveHint(offer.adaptiveHint);
         _streamBackend = offer.backend;
         candidates.addAll(_parseOfferCandidates(offer));
+        final hasMpegTs = candidates.any(
+          (c) => c.transport == _StreamTransport.mpegTs,
+        );
+        if (!hasMpegTs && _offerSuggestsMissingTsEncoder(offer.raw)) {
+          status = status.isEmpty
+              ? 'No H.264/H.265 stream encoder on server (install ffmpeg on PC)'
+              : '$status | no H.264/H.265 encoder on server';
+        }
 
         if (candidates.isEmpty) {
           status = 'stream_offer returned no compatible candidates';
@@ -711,6 +835,25 @@ class _ControlScreenState extends State<ControlScreen> {
     _armCandidateStartupTimeout();
   }
 
+  bool _offerSuggestsMissingTsEncoder(Map<String, dynamic>? raw) {
+    final support = raw?['support'];
+    if (support is! Map) return false;
+    final h264 = _asBool((support as Map)['h264_encoder']);
+    final h265 = _asBool((support as Map)['h265_encoder']);
+    return !h264 && !h265;
+  }
+
+  bool _asBool(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final v = value.trim().toLowerCase();
+      if (v == '1' || v == 'true' || v == 'yes' || v == 'on') return true;
+      if (v == '0' || v == 'false' || v == 'no' || v == 'off') return false;
+    }
+    return false;
+  }
+
   void _switchToNextCandidate(String reason) {
     if (!mounted) return;
     final next = _activeStreamCandidate + 1;
@@ -727,6 +870,7 @@ class _ControlScreenState extends State<ControlScreen> {
     _log('fallback -> candidate #$next reason=$reason');
     setState(() {
       _activeStreamCandidate = next;
+      _candidateStartupRetries = 0;
       _streamWidgetNonce++;
       _streamStatus = reason;
       _resetStreamMetrics();
@@ -737,6 +881,8 @@ class _ControlScreenState extends State<ControlScreen> {
   void _markCandidateReady() {
     if (_candidateReady) return;
     _candidateReady = true;
+    _candidateReadyAtMs = DateTime.now().millisecondsSinceEpoch;
+    _candidateStartupRetries = 0;
     _candidateTimeoutTimer?.cancel();
     _streamReconnectTimer?.cancel();
     _streamReconnectTimer = null;
@@ -744,6 +890,8 @@ class _ControlScreenState extends State<ControlScreen> {
     final candidate = _currentStreamCandidate;
     if (candidate != null) {
       _streamBackend = candidate.backend;
+      _candidateFailureCount.remove(candidate.signature);
+      _lastReadyCandidateSignature = candidate.signature;
       unawaited(_savePreferredCandidateSignature(candidate.signature));
       _log('candidate ready: ${candidate.signature}');
     }
@@ -757,19 +905,81 @@ class _ControlScreenState extends State<ControlScreen> {
   void _armCandidateStartupTimeout() {
     _candidateTimeoutTimer?.cancel();
     if (_resolvingStreamOffer) return;
-    if (_currentStreamCandidate == null) return;
+    final candidate = _currentStreamCandidate;
+    if (candidate == null) return;
 
-    final timeoutMs = _fallbackPolicy.candidateTimeoutMs.clamp(1200, 2000);
+    final policyMs = _fallbackPolicy.candidateTimeoutMs.clamp(1600, 12000);
+    final preferredSignature = _lastReadyCandidateSignature.isNotEmpty
+        ? _lastReadyCandidateSignature
+        : _preferredCandidateSignature;
+    final isPreferred = preferredSignature.isNotEmpty &&
+        candidate.signature == preferredSignature;
+    // Fast first try for cold-start; if first frame doesn't arrive, fallback quickly.
+    final timeoutMs = _candidateStartupRetries <= 0
+        ? (isPreferred ? min(policyMs, 1800) : min(policyMs, 2200))
+        : policyMs;
     _candidateTimeoutTimer = Timer(Duration(milliseconds: timeoutMs), () {
       if (!_candidateReady) {
-        _switchToNextCandidate('candidate timeout (${timeoutMs}ms)');
+        _handleCandidateFailure('candidate timeout (${timeoutMs}ms)');
       }
     });
   }
 
+  void _handleCandidateFailure(String reason) {
+    final normalized = reason.toLowerCase();
+    final candidate = _currentStreamCandidate;
+    if (candidate != null) {
+      final prev = _candidateFailureCount[candidate.signature] ?? 0;
+      _candidateFailureCount[candidate.signature] = prev + 1;
+    }
+    if (_candidateReady) {
+      final transientFailure = normalized.contains('timeout') ||
+          normalized.contains('connect') ||
+          normalized.contains('eof') ||
+          normalized.contains('closed') ||
+          normalized.contains('playback') ||
+          normalized.contains('error');
+      if (transientFailure) {
+        final ageMs = _candidateReadyAtMs <= 0
+            ? -1
+            : DateTime.now().millisecondsSinceEpoch - _candidateReadyAtMs;
+        _log(
+            'ignore transient failure on ready candidate age=${ageMs}ms: $reason');
+        if (mounted && _streamStatus.isEmpty) {
+          setState(() => _streamStatus = 'stream hiccup, waiting recovery...');
+        }
+        return;
+      }
+    }
+
+    final retryable = !_candidateReady &&
+        (normalized.contains('timeout') ||
+            normalized.contains('connect') ||
+            normalized.contains('eof') ||
+            normalized.contains('closed'));
+
+    if (retryable && _candidateStartupRetries < _maxCandidateStartupRetries) {
+      _candidateStartupRetries++;
+      _log(
+        'candidate warmup retry $_candidateStartupRetries/$_maxCandidateStartupRetries: $reason',
+      );
+      if (mounted) {
+        setState(() {
+          _streamStatus = 'retrying stream start...';
+          _streamWidgetNonce++;
+          _resetStreamMetrics();
+        });
+      }
+      _armCandidateStartupTimeout();
+      return;
+    }
+
+    _switchToNextCandidate(reason);
+  }
+
   void _scheduleStreamReconnect(String reason) {
     _streamReconnectTimer?.cancel();
-    final delayMs = _streamReconnectHintMs.clamp(100, 30000);
+    final delayMs = _streamReconnectHintMs.clamp(1200, 30000);
     _log('stream reconnect scheduled in ${delayMs}ms ($reason)');
     _streamReconnectTimer = Timer(Duration(milliseconds: delayMs), () {
       if (!mounted || _resolvingStreamOffer) return;
@@ -790,7 +1000,8 @@ class _ControlScreenState extends State<ControlScreen> {
         return;
       }
 
-      if (_streamFps <= 0.1) {
+      final noTraffic = _streamKbps <= 2.0 && _lastFrameKb <= 0;
+      if (_streamFps <= 0.1 && noTraffic) {
         _stallZeroFpsSeconds++;
       } else {
         _stallZeroFpsSeconds = 0;
@@ -807,12 +1018,13 @@ class _ControlScreenState extends State<ControlScreen> {
     _adaptiveTimer?.cancel();
     _adaptiveTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (_resolvingStreamOffer || !_candidateReady) return;
-      if (_streamFps <= 0.1) return;
+      final effectiveFps = _effectiveFpsForAdaptive();
+      if (effectiveFps <= 0.1) return;
       final nowMs = DateTime.now().millisecondsSinceEpoch;
 
       final decision = _adaptiveController.evaluate(
         nowMs: nowMs,
-        effectiveFps: _streamFps,
+        effectiveFps: effectiveFps,
         rttMs: _currentRttMs,
         sampleIntervalMs: 2000,
       );
@@ -860,6 +1072,14 @@ class _ControlScreenState extends State<ControlScreen> {
       if (next == _adaptiveParams) return;
       final previousParams = _adaptiveParams;
       final widthChanged = next.maxWidth != previousParams.maxWidth;
+      if (!widthChanged) {
+        _log(
+          'adaptive skipped non-width change: '
+          'q/f ${previousParams.quality}/${previousParams.fps}'
+          '->${next.quality}/${next.fps}',
+        );
+        return;
+      }
       setState(() {
         _adaptiveParams = next;
         _streamStatus = widthChanged
@@ -868,10 +1088,6 @@ class _ControlScreenState extends State<ControlScreen> {
                 'q/f ${previousParams.quality}/${previousParams.fps}'
                 '->${next.quality}/${next.fps}';
       });
-      if (!widthChanged && next.fps != previousParams.fps) {
-        _adaptiveController =
-            _createAdaptiveController(initialWidth: _adaptiveParams.maxWidth);
-      }
       _lastAdaptiveResolveAtMs = nowMs;
       unawaited(_resolveStreamCandidates(reason: _streamStatus));
     });
@@ -916,6 +1132,35 @@ class _ControlScreenState extends State<ControlScreen> {
       return _adaptiveParams.copyWith(quality: nextQuality, fps: nextFps);
     }
     return _adaptiveParams;
+  }
+
+  double _effectiveFpsForAdaptive() {
+    final candidate = _currentStreamCandidate;
+    final renderFps = _streamRenderFps > 0 ? _streamRenderFps : _streamFps;
+    if (candidate?.transport != _StreamTransport.mjpeg) {
+      return renderFps;
+    }
+
+    final target = _adaptiveParams.fps.toDouble();
+    final mostlyStatic = _streamDuplicateRatio >= 0.75 &&
+        _streamUniqueFps <= max(1.0, target * 0.15) &&
+        _lastDecodeMs <= 45;
+    if (mostlyStatic) {
+      // For static screens, low render-fps is often a duplicate-frame effect,
+      // not a bandwidth/latency bottleneck.
+      return max(renderFps, target * 0.9);
+    }
+    return renderFps;
+  }
+
+  int _mjpegDecodeCacheWidth(BuildContext context) {
+    final mq = MediaQuery.maybeOf(context);
+    if (mq == null) return min(_adaptiveParams.maxWidth, 1280);
+    final longestSide = max(mq.size.width, mq.size.height);
+    final dpr = mq.devicePixelRatio <= 0 ? 1.0 : mq.devicePixelRatio;
+    final screenPx = (longestSide * dpr).round();
+    final targetPx = min(1440, max(960, screenPx));
+    return max(640, min(_adaptiveParams.maxWidth, targetPx));
   }
 
   double get _currentRttMs {
@@ -1027,7 +1272,7 @@ class _ControlScreenState extends State<ControlScreen> {
             setState(() => _frameSize = sz);
           },
           onStreamFailure: (reason) {
-            _switchToNextCandidate('video/mp2t failed: $reason');
+            _handleCandidateFailure('video/mp2t failed: $reason');
           },
         );
       case _StreamTransport.mjpeg:
@@ -1038,11 +1283,11 @@ class _ControlScreenState extends State<ControlScreen> {
             'Authorization': 'Bearer ${widget.token}',
           },
           lowLatency: _settings.lowLatency,
-          cacheWidth: _adaptiveParams.maxWidth,
+          cacheWidth: _mjpegDecodeCacheWidth(context),
           initialFrameTimeout:
               Duration(milliseconds: _fallbackPolicy.candidateTimeoutMs),
           onStreamFailure: (reason) {
-            _switchToNextCandidate('mjpeg failed: $reason');
+            _handleCandidateFailure('mjpeg failed: $reason');
           },
           onImageSize: (sz) {
             if (!mounted) return;
@@ -1057,6 +1302,9 @@ class _ControlScreenState extends State<ControlScreen> {
             }
             setState(() {
               _streamFps = s.fps;
+              _streamRenderFps = s.renderFps;
+              _streamUniqueFps = s.uniqueFps;
+              _streamDuplicateRatio = s.duplicateRatio;
               _streamKbps = s.kbps;
               _lastFrameKb = (s.lastFrameBytes / 1024).round();
               _lastDecodeMs = s.lastDecodeMs;
@@ -1101,7 +1349,8 @@ class _ControlScreenState extends State<ControlScreen> {
     final streamOffer = await _fetchJson(
       '/api/stream_offer',
       query: <String, String>{
-        'low_latency': '1',
+        'low_latency': _settings.lowLatency ? '1' : '0',
+        'audio': '1',
         'max_w': _adaptiveParams.maxWidth.toString(),
         'quality': _adaptiveParams.quality.toString(),
         'fps': _adaptiveParams.fps.toString(),
@@ -1129,6 +1378,9 @@ class _ControlScreenState extends State<ControlScreen> {
               },
         'stream_backend': _streamBackend,
         'fps': _streamFps,
+        'render_fps': _streamRenderFps,
+        'unique_fps': _streamUniqueFps,
+        'duplicate_ratio': _streamDuplicateRatio,
         'decode_ms': _lastDecodeMs,
         'rtt_ms': _currentRttMs,
         'reconnect_count': _wsReconnectCount,
@@ -1227,8 +1479,8 @@ class _ControlScreenState extends State<ControlScreen> {
                       ),
                       if (_settings.showCursor && _cursorInit)
                         Positioned(
-                          left: _cursor.dx,
-                          top: _cursor.dy,
+                          left: _cursor.dx - (_cursorSize.width / 2),
+                          top: _cursor.dy - (_cursorSize.height / 2),
                           child: const IgnorePointer(
                             child: _CursorOverlay(),
                           ),
@@ -1240,95 +1492,184 @@ class _ControlScreenState extends State<ControlScreen> {
             ),
           ),
           Positioned.fill(
-            child: Listener(
-              onPointerDown: _handlePointerDown,
-              onPointerMove: _handlePointerMove,
-              onPointerUp: _handlePointerUp,
-              child: Container(color: Colors.transparent),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                _touchSurfaceSize = constraints.biggest;
+                return Listener(
+                  onPointerDown: _handlePointerDown,
+                  onPointerMove: _handlePointerMove,
+                  onPointerUp: _handlePointerUp,
+                  child: Container(color: Colors.transparent),
+                );
+              },
             ),
           ),
           SafeArea(
             child: Column(
               children: [
                 _glassPanel(
-                  child: Row(
+                  margin: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _iconBtn(Icons.arrow_back,
-                          tooltip: 'Назад',
-                          onTap: () => Navigator.pop(context)),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              _isConnected ? 'В СЕТИ' : 'НЕ В СЕТИ',
-                              style: TextStyle(
-                                color:
-                                    _isConnected ? kAccentColor : Colors.grey,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            Text(
-                              [
-                                'CPU $_cpu',
-                                if (_ram.isNotEmpty) 'RAM $_ram',
-                                'FPS ${_streamFps.toStringAsFixed(0)}',
-                                '${_streamKbps.toStringAsFixed(0)} kbps',
-                                'RTT ${_currentRttMs.toStringAsFixed(0)}ms',
-                              ].join('  '),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  fontSize: 10, color: Colors.grey),
-                            ),
-                            Text(
-                              _streamDetailsLabel(),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  fontSize: 10, color: Colors.grey),
-                            ),
-                            if (_streamStatus.isNotEmpty)
-                              Text(
-                                _streamStatus,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    fontSize: 10, color: Colors.orangeAccent),
-                              ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 8),
                       Row(
-                        mainAxisSize: MainAxisSize.min,
                         children: [
                           _iconBtn(
-                            Icons.bug_report,
-                            tooltip: 'Diagnostics',
-                            color: Colors.lightBlueAccent,
-                            onTap: _openDiagnostics,
+                            Icons.arrow_back,
+                            tooltip: 'Back',
+                            onTap: () => Navigator.pop(context),
                           ),
-                          _iconBtn(
-                            Icons.keyboard,
-                            tooltip: 'Клавиатура',
-                            onTap: () =>
-                                setState(() => _showKeyboard = !_showKeyboard),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Row(
+                                  children: [
+                                    Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: _isConnected
+                                            ? kAccentColor
+                                            : Colors.redAccent,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      _isConnected ? 'CONNECTED' : 'OFFLINE',
+                                      style: TextStyle(
+                                        color: _isConnected
+                                            ? kAccentColor
+                                            : Colors.redAccent,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 0.3,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  _streamDetailsLabel(),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                          _iconBtn(
-                            Icons.rotate_right,
-                            tooltip: 'Повернуть',
-                            color: Colors.amber,
-                            onTap: () =>
-                                setState(() => _rot = (_rot + 90) % 360),
+                          if (_debugModeEnabled) ...[
+                            const SizedBox(width: 8),
+                            _iconBtn(
+                              Icons.bug_report,
+                              tooltip: 'Diagnostics',
+                              color: Colors.lightBlueAccent,
+                              onTap: _openDiagnostics,
+                            ),
+                          ],
+                        ],
+                      ),
+                      if (_streamStatus.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _streamStatus,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.orangeAccent,
                           ),
+                        ),
+                      ],
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _metricChip(
+                            'FPS',
+                            _streamFps.toStringAsFixed(0),
+                            valueColor:
+                                _streamFps >= 24 ? kAccentColor : Colors.amber,
+                          ),
+                          _metricChip(
+                            'RTT',
+                            '${_currentRttMs.toStringAsFixed(0)} ms',
+                          ),
+                          _metricChip(
+                            'RATE',
+                            '${_streamKbps.toStringAsFixed(0)} kbps',
+                          ),
+                          if (_debugModeEnabled) _metricChip('CPU', _cpu),
+                          if (_debugModeEnabled && _ram.isNotEmpty)
+                            _metricChip('RAM', _ram),
                         ],
                       ),
                     ],
                   ),
                 ),
                 const Spacer(),
+                _glassPanel(
+                  margin: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                  radius: BorderRadius.circular(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _dockBtn(
+                              icon: Icons.keyboard,
+                              label: _showKeyboard ? 'Hide keys' : 'Keyboard',
+                              active: _showKeyboard,
+                              onTap: () => setState(
+                                () => _showKeyboard = !_showKeyboard,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _dockBtn(
+                              icon: Icons.rotate_right,
+                              label: 'Rotate',
+                              iconColor: Colors.amber,
+                              onTap: () =>
+                                  setState(() => _rot = (_rot + 90) % 360),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _modeToggleBtn(
+                              icon: Icons.mouse,
+                              label: 'Touchpad',
+                              active: !_isTabletControlMode,
+                              onTap: () =>
+                                  unawaited(_setControlMode('touchpad')),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _modeToggleBtn(
+                              icon: Icons.touch_app,
+                              label: 'Tablet',
+                              active: _isTabletControlMode,
+                              onTap: () => unawaited(_setControlMode('tablet')),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
           ),
@@ -1527,6 +1868,105 @@ class _ControlScreenState extends State<ControlScreen> {
     return Tooltip(message: tooltip, child: btn);
   }
 
+  Widget _metricChip(
+    String label,
+    String value, {
+    Color valueColor = Colors.white,
+  }) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 86),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF141414),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF2A2A2A)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 10,
+              color: Colors.white54,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 12,
+              color: valueColor,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dockBtn({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    bool active = false,
+    Color iconColor = Colors.white,
+  }) {
+    final borderColor = active ? kAccentColor : const Color(0xFF2D2D2D);
+    final background =
+        active ? const Color(0xFF103527) : const Color(0xFF141414);
+    return SizedBox(
+      height: 52,
+      child: Material(
+        color: background,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: borderColor),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 18, color: active ? kAccentColor : iconColor),
+                const SizedBox(width: 7),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: active ? kAccentColor : Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _modeToggleBtn({
+    required IconData icon,
+    required String label,
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    return _dockBtn(
+      icon: icon,
+      label: label,
+      onTap: onTap,
+      active: active,
+      iconColor: Colors.white70,
+    );
+  }
+
   Widget _keyBtn(String text, VoidCallback onTap, {bool accent = false}) =>
       SizedBox(
         height: 42,
@@ -1575,34 +2015,25 @@ class _CursorPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final w = size.width;
-    final h = size.height;
-    final p = Path()
-      ..moveTo(0, 0)
-      ..lineTo(0, h * 0.78)
-      ..lineTo(w * 0.24, h * 0.60)
-      ..lineTo(w * 0.34, h)
-      ..lineTo(w * 0.50, h * 0.94)
-      ..lineTo(w * 0.38, h * 0.58)
-      ..lineTo(w * 0.62, h * 0.58)
-      ..close();
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.shortestSide * 0.42;
 
     final shadow = Paint()
-      ..color = Colors.black.withValues(alpha: 0.2)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.2);
-    canvas.save();
-    canvas.translate(1, 1);
-    canvas.drawPath(p, shadow);
-    canvas.restore();
+      ..color = Colors.black.withValues(alpha: 0.28)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1.4);
+    canvas.drawCircle(center.translate(0.6, 0.8), radius, shadow);
 
-    final fill = Paint()..color = Colors.white;
-    canvas.drawPath(p, fill);
+    final fill = Paint()..color = Colors.white.withValues(alpha: 0.92);
+    canvas.drawCircle(center, radius, fill);
 
     final stroke = Paint()
-      ..color = Colors.black
+      ..color = Colors.black.withValues(alpha: 0.7)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.0;
-    canvas.drawPath(p, stroke);
+    canvas.drawCircle(center, radius, stroke);
+
+    final centerDot = Paint()..color = kAccentColor;
+    canvas.drawCircle(center, radius * 0.32, centerDot);
   }
 
   @override

@@ -203,6 +203,7 @@ ParsedStreamOffer parseStreamOffer(
   required Uri Function(String raw) resolveCandidateUri,
   required String token,
   bool includeAuthQueryToken = false,
+  bool lowLatency = true,
   required int maxWidth,
   required int quality,
   required int fps,
@@ -216,8 +217,8 @@ ParsedStreamOffer parseStreamOffer(
     return ParsedStreamOffer(
       candidates: const <ParsedStreamCandidate>[],
       fallbackPolicy: const StreamFallbackPolicy(
-        candidateTimeoutMs: 1600,
-        stallSeconds: 5,
+        candidateTimeoutMs: 2800,
+        stallSeconds: 8,
       ),
       adaptiveHint: fallback,
       reconnectHintMs: 1200,
@@ -240,6 +241,7 @@ ParsedStreamOffer parseStreamOffer(
     resolveCandidateUri: resolveCandidateUri,
     token: token,
     includeAuthQueryToken: includeAuthQueryToken,
+    lowLatency: lowLatency,
     maxWidth: maxWidth,
     quality: quality,
     fps: fps,
@@ -274,6 +276,7 @@ List<ParsedStreamCandidate> parseStreamOfferCandidates(
   required Uri Function(String raw) resolveCandidateUri,
   required String token,
   bool includeAuthQueryToken = false,
+  bool lowLatency = true,
   required int maxWidth,
   required int quality,
   required int fps,
@@ -283,6 +286,7 @@ List<ParsedStreamCandidate> parseStreamOfferCandidates(
     resolveCandidateUri: resolveCandidateUri,
     token: token,
     includeAuthQueryToken: includeAuthQueryToken,
+    lowLatency: lowLatency,
     maxWidth: maxWidth,
     quality: quality,
     fps: fps,
@@ -327,6 +331,7 @@ List<ParsedStreamCandidate> _parseCandidates(
   required Uri Function(String raw) resolveCandidateUri,
   required String token,
   required bool includeAuthQueryToken,
+  required bool lowLatency,
   required int maxWidth,
   required int quality,
   required int fps,
@@ -344,6 +349,7 @@ List<ParsedStreamCandidate> _parseCandidates(
       resolveCandidateUri: resolveCandidateUri,
       token: token,
       includeAuthQueryToken: includeAuthQueryToken,
+      lowLatency: lowLatency,
       maxWidth: maxWidth,
       quality: quality,
       fps: fps,
@@ -362,26 +368,26 @@ StreamFallbackPolicy _parseFallbackPolicy(Map<String, dynamic> payload) {
     final mode = raw.trim().toLowerCase();
     if (mode == 'ordered_candidates' || mode == 'ordered') {
       return const StreamFallbackPolicy(
-          candidateTimeoutMs: 1600, stallSeconds: 5);
+          candidateTimeoutMs: 2800, stallSeconds: 8);
     }
   }
   if (raw is! Map) {
     return const StreamFallbackPolicy(
-        candidateTimeoutMs: 1600, stallSeconds: 5);
+        candidateTimeoutMs: 2800, stallSeconds: 8);
   }
   final map = _normalizeMap(raw);
   final timeoutMs = _toInt(
         map['candidate_timeout_ms'] ??
             map['candidate_fail_timeout_ms'] ??
             map['switch_timeout_ms'],
-      )?.clamp(1200, 2000) ??
-      1600;
+      )?.clamp(1600, 12000) ??
+      2800;
   final stallSeconds = _toInt(
         map['stall_seconds'] ??
             map['stall_timeout_s'] ??
             map['stall_timeout_sec'],
-      )?.clamp(2, 12) ??
-      5;
+      )?.clamp(4, 20) ??
+      8;
   return StreamFallbackPolicy(
     candidateTimeoutMs: timeoutMs,
     stallSeconds: stallSeconds,
@@ -406,7 +412,7 @@ StreamAdaptiveHint _parseAdaptiveHint(
   final minQuality = (_toInt(map['min_quality']) ?? fallback.minQuality)
       .clamp(10, baseQuality);
 
-  final maxFps = (_toInt(map['max_fps']) ?? baseFps).clamp(minFps, 60);
+  final maxFps = (_toInt(map['max_fps']) ?? baseFps).clamp(minFps, 120);
   final maxMaxWidth =
       (_toInt(map['max_max_w'] ?? map['max_max_width']) ?? baseMaxWidth)
           .clamp(minMaxWidth, 4096);
@@ -509,6 +515,7 @@ ParsedStreamCandidate? _parseOne(
   required Uri Function(String raw) resolveCandidateUri,
   required String token,
   required bool includeAuthQueryToken,
+  required bool lowLatency,
   required int maxWidth,
   required int quality,
   required int fps,
@@ -536,6 +543,7 @@ ParsedStreamCandidate? _parseOne(
     resolved,
     token: token,
     includeAuthQueryToken: includeAuthQueryToken,
+    lowLatency: lowLatency,
     maxWidth: maxWidth,
     quality: quality,
     fps: fps,
@@ -563,6 +571,7 @@ Uri _augmentCandidateUri(
   Uri uri, {
   required String token,
   required bool includeAuthQueryToken,
+  required bool lowLatency,
   required int maxWidth,
   required int quality,
   required int fps,
@@ -574,7 +583,7 @@ Uri _augmentCandidateUri(
   } else {
     query.remove('token');
   }
-  query['low_latency'] = '1';
+  query['low_latency'] = lowLatency ? '1' : '0';
   query['max_w'] = maxWidth.toString();
   if (includeMjpegParams) {
     query['quality'] = quality.toString();

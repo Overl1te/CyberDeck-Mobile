@@ -65,30 +65,42 @@ class SavedDevice {
 class AppSettings {
   final int defaultPort;
   final bool autoScanOnConnect;
+  final bool debugMode;
 
   const AppSettings({
     required this.defaultPort,
     required this.autoScanOnConnect,
+    required this.debugMode,
   });
 
-  factory AppSettings.defaults() =>
-      const AppSettings(defaultPort: 8080, autoScanOnConnect: true);
+  factory AppSettings.defaults() => const AppSettings(
+        defaultPort: 8080,
+        autoScanOnConnect: true,
+        debugMode: false,
+      );
 
-  AppSettings copyWith({int? defaultPort, bool? autoScanOnConnect}) {
+  AppSettings copyWith({
+    int? defaultPort,
+    bool? autoScanOnConnect,
+    bool? debugMode,
+  }) {
     return AppSettings(
       defaultPort: defaultPort ?? this.defaultPort,
       autoScanOnConnect: autoScanOnConnect ?? this.autoScanOnConnect,
+      debugMode: debugMode ?? this.debugMode,
     );
   }
 
   Map<String, dynamic> toJson() => {
         'defaultPort': defaultPort,
         'autoScanOnConnect': autoScanOnConnect,
+        'debugMode': debugMode,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
         defaultPort: (json['defaultPort'] as num?)?.toInt() ?? 8080,
         autoScanOnConnect: json['autoScanOnConnect'] as bool? ?? true,
+        debugMode: json['debugMode'] as bool? ?? false,
       );
 }
 
@@ -105,6 +117,7 @@ class DeviceSettings {
   final int streamFps;
   final bool showCursor;
   final bool lowLatency;
+  final String controlMode;
 
   const DeviceSettings({
     required this.alias,
@@ -119,6 +132,7 @@ class DeviceSettings {
     required this.streamFps,
     required this.showCursor,
     required this.lowLatency,
+    required this.controlMode,
   });
 
   factory DeviceSettings.defaults() => const DeviceSettings(
@@ -129,11 +143,12 @@ class DeviceSettings {
         confirmDownloads: true,
         browserFallback: true,
         transferPreset: 'balanced',
-        streamMaxWidth: 1280,
-        streamQuality: 50,
-        streamFps: 30,
+        streamMaxWidth: 1920,
+        streamQuality: 68,
+        streamFps: 60,
         showCursor: true,
         lowLatency: false,
+        controlMode: 'touchpad',
       );
 
   DeviceSettings copyWith({
@@ -149,6 +164,7 @@ class DeviceSettings {
     int? streamFps,
     bool? showCursor,
     bool? lowLatency,
+    String? controlMode,
   }) {
     return DeviceSettings(
       alias: alias ?? this.alias,
@@ -163,6 +179,7 @@ class DeviceSettings {
       streamFps: streamFps ?? this.streamFps,
       showCursor: showCursor ?? this.showCursor,
       lowLatency: lowLatency ?? this.lowLatency,
+      controlMode: _normalizeControlMode(controlMode ?? this.controlMode),
     );
   }
 
@@ -179,6 +196,7 @@ class DeviceSettings {
         'streamFps': streamFps,
         'showCursor': showCursor,
         'lowLatency': lowLatency,
+        'controlMode': controlMode,
       };
 
   factory DeviceSettings.fromJson(Map<String, dynamic> json) => DeviceSettings(
@@ -189,12 +207,19 @@ class DeviceSettings {
         confirmDownloads: json['confirmDownloads'] as bool? ?? true,
         browserFallback: json['browserFallback'] as bool? ?? true,
         transferPreset: json['transferPreset']?.toString() ?? 'balanced',
-        streamMaxWidth: (json['streamMaxWidth'] as num?)?.toInt() ?? 1280,
-        streamQuality: (json['streamQuality'] as num?)?.toInt() ?? 50,
-        streamFps: (json['streamFps'] as num?)?.toInt() ?? 30,
+        streamMaxWidth: (json['streamMaxWidth'] as num?)?.toInt() ?? 1920,
+        streamQuality: (json['streamQuality'] as num?)?.toInt() ?? 68,
+        streamFps: (json['streamFps'] as num?)?.toInt() ?? 60,
         showCursor: json['showCursor'] as bool? ?? true,
         lowLatency: json['lowLatency'] as bool? ?? false,
+        controlMode: _normalizeControlMode(json['controlMode']?.toString()),
       );
+
+  static String _normalizeControlMode(String? raw) {
+    final value = (raw ?? '').trim().toLowerCase();
+    if (value == 'tablet') return 'tablet';
+    return 'touchpad';
+  }
 }
 
 class DeviceStorage {
