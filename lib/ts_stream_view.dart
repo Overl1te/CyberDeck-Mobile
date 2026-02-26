@@ -7,6 +7,7 @@ class TsStreamView extends StatefulWidget {
   final String streamUrl;
   final Map<String, String> headers;
   final Duration startupTimeout;
+  final bool lowLatency;
   final ValueChanged<Size>? onVideoSize;
   final VoidCallback? onReady;
   final ValueChanged<String>? onStreamFailure;
@@ -18,6 +19,7 @@ class TsStreamView extends StatefulWidget {
     required this.streamUrl,
     this.headers = const <String, String>{},
     this.startupTimeout = const Duration(seconds: 4),
+    this.lowLatency = false,
     this.onVideoSize,
     this.onReady,
     this.onStreamFailure,
@@ -32,8 +34,12 @@ class TsStreamView extends StatefulWidget {
 class _TsStreamViewState extends State<TsStreamView> {
   late VlcPlayerController _controller;
   Timer? _startupTimer;
+  Timer? _audioPrimeTimer;
   bool _isReady = false;
   bool _failureReported = false;
+  bool _audioPrimed = false;
+  bool _audioPrimeInFlight = false;
+  int _audioPrimeAttempts = 0;
   Size _lastSize = Size.zero;
   String? _lastError;
 
@@ -43,6 +49,7 @@ class _TsStreamViewState extends State<TsStreamView> {
     _controller = _createController(widget.streamUrl);
     _controller.addListener(_onControllerChanged);
     _armStartupTimeout();
+    _ensureAudioLevel();
   }
 
   @override
@@ -56,15 +63,20 @@ class _TsStreamViewState extends State<TsStreamView> {
   @override
   void dispose() {
     _startupTimer?.cancel();
+    _audioPrimeTimer?.cancel();
     _controller.removeListener(_onControllerChanged);
     _controller.dispose();
     super.dispose();
   }
 
   VlcPlayerController _createController(String url) {
+    final networkCacheMs = widget.lowLatency ? 80 : 220;
+    final liveCacheMs = widget.lowLatency ? 40 : 140;
     final extras = <String>[
       '--clock-jitter=0',
       '--clock-synchro=0',
+      '--network-caching=$networkCacheMs',
+      '--live-caching=$liveCacheMs',
     ];
     final auth = (widget.headers['Authorization'] ?? '').trim();
     if (auth.isNotEmpty) {
@@ -76,11 +88,11 @@ class _TsStreamViewState extends State<TsStreamView> {
       url,
       autoInitialize: true,
       autoPlay: true,
-      hwAcc: HwAcc.full,
+      hwAcc: HwAcc.auto,
       options: VlcPlayerOptions(
         advanced: VlcAdvancedOptions(<String>[
-          VlcAdvancedOptions.networkCaching(60),
-          VlcAdvancedOptions.liveCaching(30),
+          VlcAdvancedOptions.networkCaching(networkCacheMs),
+          VlcAdvancedOptions.liveCaching(liveCacheMs),
         ]),
         http: VlcHttpOptions(<String>[
           VlcHttpOptions.httpReconnect(true),
@@ -96,19 +108,89 @@ class _TsStreamViewState extends State<TsStreamView> {
 
   Future<void> _replaceController(String url) async {
     _startupTimer?.cancel();
+    _audioPrimeTimer?.cancel();
     _controller.removeListener(_onControllerChanged);
     await _controller.dispose();
 
     _isReady = false;
     _failureReported = false;
+    _audioPrimed = false;
+    _audioPrimeInFlight = false;
+    _audioPrimeAttempts = 0;
     _lastError = null;
     _lastSize = Size.zero;
 
     _controller = _createController(url);
     _controller.addListener(_onControllerChanged);
     _armStartupTimeout();
+    _ensureAudioLevel();
 
     if (mounted) setState(() {});
+  }
+
+  void _ensureAudioLevel() {
+    Future<void>(() async {
+      try {
+        await _controller.setVolume(100);
+      } catch (_) {
+        // Best effort: some VLC backends may throw during early init.
+      }
+    });
+  }
+
+  Future<bool> _primeAudioTrack() async {
+    if (_audioPrimed || _audioPrimeInFlight) return _audioPrimed;
+    _audioPrimeInFlight = true;
+    try {
+      await _controller.setVolume(100);
+      final tracks = await _controller.getAudioTracks();
+      if (tracks.isEmpty) return false;
+      var current = await _controller.getAudioTrack();
+      if ((current ?? -1) < 0) {
+        int? firstPlayable;
+        for (final id in tracks.keys) {
+          if (id >= 0) {
+            firstPlayable = id;
+            break;
+          }
+        }
+        if (firstPlayable != null) {
+          await _controller.setAudioTrack(firstPlayable);
+          current = await _controller.getAudioTrack();
+        }
+      }
+      _audioPrimed = (current ?? -1) >= 0;
+      if (_audioPrimed) {
+        _audioPrimeTimer?.cancel();
+      }
+      return _audioPrimed;
+    } catch (_) {
+      // Best effort: some platforms may fail early while tracks are still unavailable.
+      return false;
+    } finally {
+      _audioPrimeInFlight = false;
+    }
+  }
+
+  void _scheduleAudioPriming() {
+    _audioPrimeTimer?.cancel();
+    _audioPrimeAttempts = 0;
+    _audioPrimeTimer =
+        Timer.periodic(const Duration(milliseconds: 420), (timer) {
+      if (!mounted || !_isReady || _audioPrimed) {
+        if (!mounted || _audioPrimed) {
+          timer.cancel();
+        }
+        return;
+      }
+      _audioPrimeAttempts++;
+      Future<void>(() async {
+        final ok = await _primeAudioTrack();
+        if (ok || _audioPrimeAttempts >= 20) {
+          timer.cancel();
+        }
+      });
+    });
   }
 
   void _armStartupTimeout() {
@@ -154,8 +236,17 @@ class _TsStreamViewState extends State<TsStreamView> {
       if (_lastError != null) {
         _lastError = null;
       }
+      _scheduleAudioPriming();
       widget.onReady?.call();
       setState(() {});
+    }
+    if (!_audioPrimed && value.audioTracksCount > 0) {
+      Future<void>(() async {
+        final ok = await _primeAudioTrack();
+        if (ok) {
+          _audioPrimeTimer?.cancel();
+        }
+      });
     }
   }
 

@@ -23,6 +23,7 @@
   "qrLoginNotSupported": "QR login is not supported by the server",
   "qrTokenInvalidOrExpired": "QR token is invalid or expired",
   "qrFallbackToHandshake": "QR login unavailable. Falling back to PIN handshake.",
+  "approvalPendingOnDesktop": "Connection request sent. Approve this device on the PC.",
   "tlsInsecureWarning": "TLS connection is insecure or uses a self-signed certificate. Verify server certificate settings.",
   "invalidResponseMissingToken": "Invalid response: missing token",
   "invalidHostOrPort": "Invalid host or port",
@@ -65,6 +66,20 @@
   "downloading": "Downloading...",
   "savedFile": "Saved: {filename}",
   "@savedFile": {
+    "placeholders": {
+      "filename": {}
+    }
+  },
+  "deviceConnectedNotificationTitle": "Device connected",
+  "deviceConnectedNotificationBody": "{device} is now online",
+  "@deviceConnectedNotificationBody": {
+    "placeholders": {
+      "device": {}
+    }
+  },
+  "fileReceivedNotificationTitle": "File received",
+  "fileReceivedNotificationBody": "Saved file: {filename}",
+  "@fileReceivedNotificationBody": {
     "placeholders": {
       "filename": {}
     }

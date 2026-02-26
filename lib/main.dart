@@ -1,20 +1,81 @@
+import 'dart:async';
+
+import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import 'connect_screen.dart';
 import 'home_screen.dart';
 import 'l10n/app_localizations.dart';
+import 'services/system_notifications.dart';
 import 'theme.dart';
 
-void main() => runApp(const CyberDeckApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemNotifications.initialize();
+  runApp(const CyberDeckApp());
+}
 
-class CyberDeckApp extends StatelessWidget {
+class CyberDeckApp extends StatefulWidget {
   const CyberDeckApp({super.key});
+
+  @override
+  State<CyberDeckApp> createState() => _CyberDeckAppState();
+}
+
+class _CyberDeckAppState extends State<CyberDeckApp> {
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  StreamSubscription<Uri>? _deepLinkSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_bindDeepLinks());
+  }
+
+  @override
+  void dispose() {
+    _deepLinkSubscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _bindDeepLinks() async {
+    final appLinks = AppLinks();
+
+    try {
+      final initialUri = await appLinks.getInitialLink();
+      if (initialUri != null) {
+        _openFromDeepLink(initialUri.toString());
+      }
+    } catch (_) {}
+
+    _deepLinkSubscription = appLinks.uriLinkStream.listen(
+      (uri) => _openFromDeepLink(uri.toString()),
+      onError: (_) {},
+    );
+  }
+
+  void _openFromDeepLink(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final navigator = _navigatorKey.currentState;
+      if (navigator == null) return;
+      navigator.push(
+        MaterialPageRoute(
+          builder: (_) => ConnectScreen(initialQrRaw: trimmed),
+        ),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final baseDark = ThemeData.dark(useMaterial3: true);
 
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       onGenerateTitle: (context) => AppLocalizations.of(context)!.appTitle,
       debugShowCheckedModeBanner: false,
       localizationsDelegates: const <LocalizationsDelegate<dynamic>>[

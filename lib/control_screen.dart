@@ -13,6 +13,7 @@ import 'control/controllers/control_stats_controller.dart';
 import 'device_storage.dart';
 import 'diagnostics_screen.dart';
 import 'file_transfer.dart';
+import 'audio_relay_view.dart';
 import 'mjpeg_view.dart';
 import 'network/api_client.dart';
 import 'network/host_port.dart';
@@ -67,6 +68,9 @@ class _ControlScreenState extends State<ControlScreen> {
   double _scrollFactor = 3.0;
 
   int _lastSendTime = 0;
+  int _lastZoomHotkeyAtMs = 0;
+  int _lastAbsSendTime = 0;
+  Offset? _lastAbsSent;
 
   double _lastX = 0, _lastY = 0;
   int _lastTapTime = 0;
@@ -77,9 +81,28 @@ class _ControlScreenState extends State<ControlScreen> {
   int _maxPointerCount = 0;
   double _scrollYAccumulator = 0;
   bool _skipNextMove = false;
+  final Map<int, Offset> _activePointers = <int, Offset>{};
+  Offset? _twoFingerLastCenter;
+  double _twoFingerLastDistance = 0;
+  double _twoFingerPanScore = 0;
+  double _twoFingerSpanScore = 0;
+  double _zoomAccumulator = 0;
+  _TwoFingerGesture _twoFingerGesture = _TwoFingerGesture.idle;
+
+  static const double _twoFingerDecisionThreshold = 10;
+  static const double _twoFingerZoomStep = 16;
+  static const int _zoomHotkeyCooldownMs = 45;
 
   bool _showKeyboard = false;
+  bool _showHudDetails = false;
+  bool _pcMuted = false;
+  bool _volumeBusy = false;
+  double _pcVolumeUi = 50;
+  int _pcVolumeEstimate = 50;
   final TextEditingController _msgController = TextEditingController();
+
+  static const int _volumeKeyStepPercent = 2;
+  static const int _volumeMaxPressesPerApply = 60;
 
   double _streamFps = 0;
   double _streamRenderFps = 0;
@@ -104,6 +127,7 @@ class _ControlScreenState extends State<ControlScreen> {
   bool _resolvingStreamOffer = true;
   String _streamStatus = '';
   String _streamBackend = 'unknown';
+  String _audioRelayStatus = '';
 
   Timer? _candidateTimeoutTimer;
   Timer? _streamReconnectTimer;
@@ -139,8 +163,15 @@ class _ControlScreenState extends State<ControlScreen> {
   String _preferredCandidateSignature = '';
   int _streamReconnectHintMs = 1200;
   int _candidateStartupRetries = 0;
-  static const int _maxCandidateStartupRetries = 1;
   int _candidateReadyAtMs = 0;
+  int _lastStreamFeedbackAtMs = 0;
+  bool _streamFeedbackInFlight = false;
+  int _readyTransientFailureCount = 0;
+  int _lastReadyTransientFailureAtMs = 0;
+  int _lastReadyTransientRestartAtMs = 0;
+  static const int _readyTransientFailureWindowMs = 6000;
+  static const int _readyTransientRestartCooldownMs = 1800;
+  static const int _readyTransientFailureEscalateCount = 2;
   final Map<String, int> _candidateFailureCount = <String, int>{};
   String _lastReadyCandidateSignature = '';
 
@@ -294,6 +325,9 @@ class _ControlScreenState extends State<ControlScreen> {
       _pointerCount = 0;
       _maxPointerCount = 0;
       _scrollYAccumulator = 0;
+      _activePointers.clear();
+      _resetTwoFingerGesture();
+      _audioRelayStatus = '';
     }
 
     setState(() => _isConnected = connected);
@@ -354,6 +388,109 @@ class _ControlScreenState extends State<ControlScreen> {
     _send({'type': 'key', 'key': key});
   }
 
+  Future<void> _toggleStreamAudio() async {
+    final next = !_settings.streamAudio;
+    final updated = _settings.copyWith(streamAudio: next);
+    if (mounted) {
+      setState(() {
+        _settings = updated;
+        if (!next) {
+          _audioRelayStatus = '';
+        }
+      });
+    } else {
+      _settings = updated;
+      if (!next) {
+        _audioRelayStatus = '';
+      }
+    }
+    await DeviceStorage.saveDeviceSettings(widget.deviceId, updated);
+    if (!mounted) return;
+    await _resolveStreamCandidates(
+      reason: next ? 'stream audio enabled' : 'stream audio disabled',
+    );
+  }
+
+  void _onVolumeUiChanged(double value) {
+    if (!mounted) return;
+    setState(() => _pcVolumeUi = value.clamp(0, 100).toDouble());
+  }
+
+  Future<void> _applyPcVolume(double value) async {
+    final target = value.round().clamp(0, 100);
+    if (_volumeBusy) return;
+    if (!_isConnected) {
+      if (!mounted) return;
+      setState(() => _pcVolumeUi = target.toDouble());
+      return;
+    }
+
+    final current = _pcVolumeEstimate.clamp(0, 100);
+    final diff = target - current;
+    if (diff == 0) {
+      if (!mounted) return;
+      setState(() => _pcVolumeUi = target.toDouble());
+      return;
+    }
+
+    var presses = (diff.abs() / _volumeKeyStepPercent).round();
+    presses = presses.clamp(1, _volumeMaxPressesPerApply);
+    final action = diff > 0 ? 'vol_up' : 'vol_down';
+
+    if (mounted) {
+      setState(() => _volumeBusy = true);
+    } else {
+      _volumeBusy = true;
+    }
+
+    for (var i = 0; i < presses; i++) {
+      _send({'type': 'media', 'action': action});
+      if ((i % 8) == 7) {
+        await Future<void>.delayed(const Duration(milliseconds: 8));
+      }
+    }
+
+    var estimated = current +
+        (action == 'vol_up'
+            ? presses * _volumeKeyStepPercent
+            : -presses * _volumeKeyStepPercent);
+    estimated = estimated.clamp(0, 100);
+    if ((target - estimated).abs() <= _volumeKeyStepPercent) {
+      estimated = target;
+    }
+
+    if (!mounted) {
+      _pcVolumeEstimate = estimated;
+      _pcVolumeUi = target.toDouble();
+      _pcMuted = estimated <= 0;
+      _volumeBusy = false;
+      return;
+    }
+    setState(() {
+      _pcVolumeEstimate = estimated;
+      _pcVolumeUi = target.toDouble();
+      if (action == 'vol_up') {
+        _pcMuted = false;
+      } else if (estimated <= 0) {
+        _pcMuted = true;
+      }
+      _volumeBusy = false;
+    });
+  }
+
+  void _togglePcMute() {
+    if (!_isConnected) return;
+    _send({'type': 'media', 'action': 'mute'});
+    if (_settings.haptics) {
+      HapticFeedback.mediumImpact();
+    }
+    if (!mounted) {
+      _pcMuted = !_pcMuted;
+      return;
+    }
+    setState(() => _pcMuted = !_pcMuted);
+  }
+
   bool get _isTabletControlMode => _settings.controlMode == 'tablet';
 
   Size _displayFrameSize() {
@@ -385,6 +522,9 @@ class _ControlScreenState extends State<ControlScreen> {
     if (rect.isEmpty || rect.width <= 0 || rect.height <= 0) {
       return null;
     }
+    if (!rect.contains(position)) {
+      return null;
+    }
     final dx = ((position.dx - rect.left) / rect.width).clamp(0.0, 1.0);
     final dy = ((position.dy - rect.top) / rect.height).clamp(0.0, 1.0);
 
@@ -403,6 +543,16 @@ class _ControlScreenState extends State<ControlScreen> {
   void _sendAbsoluteMoveForPosition(Offset position) {
     final normalized = _normalizedPointerFromSurface(position);
     if (normalized == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final last = _lastAbsSent;
+    if (last != null) {
+      final dist = (normalized - last).distance;
+      if (dist < 0.0016 && (now - _lastAbsSendTime) < 24) {
+        return;
+      }
+    }
+    _lastAbsSent = normalized;
+    _lastAbsSendTime = now;
     _send({'type': 'move_abs', 'x': normalized.dx, 'y': normalized.dy});
   }
 
@@ -415,56 +565,177 @@ class _ControlScreenState extends State<ControlScreen> {
     } else {
       _settings = updated;
     }
+    _lastAbsSent = null;
+    _lastAbsSendTime = 0;
     await DeviceStorage.saveDeviceSettings(widget.deviceId, updated);
+  }
+
+  Offset _eventPosition(PointerEvent e) {
+    final local = e.localPosition;
+    final isFinite = local.dx.isFinite && local.dy.isFinite;
+    if (isFinite) return local;
+    return e.position;
+  }
+
+  Offset _rotateDelta(Offset delta) {
+    var sdx = delta.dx;
+    var sdy = delta.dy;
+    if (_rot == 90) {
+      sdx = delta.dy;
+      sdy = -delta.dx;
+    } else if (_rot == 180) {
+      sdx = -delta.dx;
+      sdy = -delta.dy;
+    } else if (_rot == 270) {
+      sdx = -delta.dy;
+      sdy = delta.dx;
+    }
+    return Offset(sdx, sdy);
+  }
+
+  (Offset center, double distance)? _twoFingerCenterAndDistance() {
+    if (_activePointers.length < 2) return null;
+    final entries = _activePointers.entries.toList(growable: false)
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final p0 = entries[0].value;
+    final p1 = entries[1].value;
+    final center = Offset((p0.dx + p1.dx) * 0.5, (p0.dy + p1.dy) * 0.5);
+    final distance = (p0 - p1).distance;
+    return (center, distance);
+  }
+
+  void _resetTwoFingerGesture() {
+    _twoFingerLastCenter = null;
+    _twoFingerLastDistance = 0;
+    _twoFingerPanScore = 0;
+    _twoFingerSpanScore = 0;
+    _zoomAccumulator = 0;
+    _twoFingerGesture = _TwoFingerGesture.idle;
+  }
+
+  bool _sendZoomStep(bool zoomIn) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if ((now - _lastZoomHotkeyAtMs) < _zoomHotkeyCooldownMs) {
+      return false;
+    }
+    _lastZoomHotkeyAtMs = now;
+    _send({
+      'type': 'hotkey',
+      'keys': zoomIn
+          ? const <String>['ctrl', 'equal']
+          : const <String>['ctrl', 'minus'],
+    });
+    return true;
+  }
+
+  void _handleTwoFingerGesture() {
+    final pair = _twoFingerCenterAndDistance();
+    if (pair == null) return;
+
+    final center = pair.$1;
+    final distance = pair.$2;
+    if (_twoFingerLastCenter == null || _twoFingerLastDistance <= 0) {
+      _twoFingerLastCenter = center;
+      _twoFingerLastDistance = distance;
+      return;
+    }
+
+    final centerDelta = center - _twoFingerLastCenter!;
+    final rotatedDelta = _rotateDelta(centerDelta);
+    final panDy = rotatedDelta.dy;
+    final spanDelta = distance - _twoFingerLastDistance;
+    _twoFingerPanScore += panDy.abs();
+    _twoFingerSpanScore += spanDelta.abs();
+
+    if (_isTabletControlMode) {
+      _scrollYAccumulator += panDy * _scrollFactor;
+      final s = _scrollYAccumulator.truncate();
+      if (s != 0) {
+        _send({'type': 'scroll', 'dy': s});
+        _scrollYAccumulator -= s;
+        _hasMoved = true;
+      }
+      _twoFingerLastCenter = center;
+      _twoFingerLastDistance = distance;
+      return;
+    }
+
+    if (_twoFingerGesture == _TwoFingerGesture.idle) {
+      final decideZoom = _twoFingerSpanScore >= _twoFingerDecisionThreshold &&
+          _twoFingerSpanScore > (_twoFingerPanScore * 1.25 + 2);
+      final decideScroll = _twoFingerPanScore >= _twoFingerDecisionThreshold &&
+          _twoFingerPanScore > (_twoFingerSpanScore * 1.25 + 2);
+      if (decideZoom) {
+        _twoFingerGesture = _TwoFingerGesture.zoom;
+      } else if (decideScroll) {
+        _twoFingerGesture = _TwoFingerGesture.scroll;
+      }
+    }
+
+    if (_twoFingerGesture == _TwoFingerGesture.scroll) {
+      _scrollYAccumulator += panDy * _scrollFactor;
+      final s = _scrollYAccumulator.truncate();
+      if (s != 0) {
+        _send({'type': 'scroll', 'dy': s});
+        _scrollYAccumulator -= s;
+        _hasMoved = true;
+      }
+    } else if (_twoFingerGesture == _TwoFingerGesture.zoom) {
+      _zoomAccumulator += spanDelta;
+      while (_zoomAccumulator.abs() >= _twoFingerZoomStep) {
+        final zoomIn = _zoomAccumulator > 0;
+        final sent = _sendZoomStep(zoomIn);
+        if (!sent) break;
+        _zoomAccumulator += zoomIn ? -_twoFingerZoomStep : _twoFingerZoomStep;
+        _hasMoved = true;
+      }
+    }
+
+    _twoFingerLastCenter = center;
+    _twoFingerLastDistance = distance;
   }
 
   void _handlePointerMove(PointerMoveEvent e) {
     if (_showKeyboard) return;
+    final pos = _eventPosition(e);
+    _activePointers[e.pointer] = pos;
 
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastSendTime < 16) return;
     _lastSendTime = now;
 
     if (_skipNextMove) {
-      _lastX = e.position.dx;
-      _lastY = e.position.dy;
+      _lastX = pos.dx;
+      _lastY = pos.dy;
       _skipNextMove = false;
       return;
     }
 
-    double dx = e.position.dx - _lastX;
-    double dy = e.position.dy - _lastY;
+    if (_pointerCount == 2) {
+      _handleTwoFingerGesture();
+      _lastX = pos.dx;
+      _lastY = pos.dy;
+      return;
+    }
+
+    double dx = pos.dx - _lastX;
+    double dy = pos.dy - _lastY;
 
     if (dx.abs() < 0.5 && dy.abs() < 0.5) return;
     _hasMoved = true;
 
-    double sdx = dx, sdy = dy;
-    if (_rot == 90) {
-      sdx = dy;
-      sdy = -dx;
-    } else if (_rot == 180) {
-      sdx = -dx;
-      sdy = -dy;
-    } else if (_rot == 270) {
-      sdx = -dy;
-      sdy = dx;
-    }
+    final rotated = _rotateDelta(Offset(dx, dy));
+    final sdx = rotated.dx;
+    final sdy = rotated.dy;
 
-    if (_pointerCount == 2) {
-      _scrollYAccumulator += sdy * _scrollFactor;
-      final s = _scrollYAccumulator.truncate();
-      if (s != 0) {
-        _send({'type': 'scroll', 'dy': s});
-        _scrollYAccumulator -= s;
-      }
-    } else if (_isPotentialDrag && _pointerCount == 1) {
+    if (_isPotentialDrag && _pointerCount == 1) {
       if (!_isDragging && sqrt(dx * dx + dy * dy) > 5) {
         _isDragging = true;
         _send({'type': 'drag_s'});
       }
       if (_isDragging) {
         if (_isTabletControlMode) {
-          _sendAbsoluteMoveForPosition(e.position);
+          _sendAbsoluteMoveForPosition(pos);
         } else {
           _send({
             'type': 'move',
@@ -475,7 +746,7 @@ class _ControlScreenState extends State<ControlScreen> {
       }
     } else if (_pointerCount == 1) {
       if (_isTabletControlMode) {
-        _sendAbsoluteMoveForPosition(e.position);
+        _sendAbsoluteMoveForPosition(pos);
       } else {
         _send({
           'type': 'move',
@@ -485,23 +756,37 @@ class _ControlScreenState extends State<ControlScreen> {
       }
     }
 
-    _lastX = e.position.dx;
-    _lastY = e.position.dy;
+    _lastX = pos.dx;
+    _lastY = pos.dy;
   }
 
   void _handlePointerDown(PointerDownEvent e) {
     if (_showKeyboard) return;
     _pointerCount++;
     _maxPointerCount = max(_maxPointerCount, _pointerCount);
-    _skipNextMove = true;
+    _skipNextMove = !_isTabletControlMode;
+    final pos = _eventPosition(e);
+    _activePointers[e.pointer] = pos;
 
     if (_pointerCount == 1) {
-      _lastX = e.position.dx;
-      _lastY = e.position.dy;
+      _lastX = pos.dx;
+      _lastY = pos.dy;
       _hasMoved = false;
       _isDragging = false;
+      _scrollYAccumulator = 0;
+      _lastAbsSent = null;
+      _lastAbsSendTime = 0;
+      _resetTwoFingerGesture();
       if (_isTabletControlMode) {
-        _sendAbsoluteMoveForPosition(e.position);
+        _sendAbsoluteMoveForPosition(pos);
+      }
+    } else if (_pointerCount == 2) {
+      _scrollYAccumulator = 0;
+      _resetTwoFingerGesture();
+      final pair = _twoFingerCenterAndDistance();
+      if (pair != null) {
+        _twoFingerLastCenter = pair.$1;
+        _twoFingerLastDistance = pair.$2;
       }
     }
 
@@ -515,8 +800,13 @@ class _ControlScreenState extends State<ControlScreen> {
 
   void _handlePointerUp(PointerUpEvent e) {
     if (_showKeyboard) return;
+    _activePointers.remove(e.pointer);
     _pointerCount = max(0, _pointerCount - 1);
-    _skipNextMove = true;
+    _skipNextMove = !_isTabletControlMode;
+    if (_pointerCount < 2) {
+      _resetTwoFingerGesture();
+      _scrollYAccumulator = 0;
+    }
 
     if (_pointerCount == 0) {
       if (_isDragging) {
@@ -534,6 +824,31 @@ class _ControlScreenState extends State<ControlScreen> {
 
       _lastTapTime = DateTime.now().millisecondsSinceEpoch;
       _maxPointerCount = 0;
+      _activePointers.clear();
+      _lastAbsSent = null;
+      _lastAbsSendTime = 0;
+    }
+  }
+
+  void _handlePointerCancel(PointerCancelEvent e) {
+    _activePointers.remove(e.pointer);
+    _pointerCount = max(0, _pointerCount - 1);
+    _skipNextMove = !_isTabletControlMode;
+    if (_pointerCount < 2) {
+      _resetTwoFingerGesture();
+      _scrollYAccumulator = 0;
+    }
+    if (_pointerCount == 0) {
+      if (_isDragging) {
+        _send({'type': 'drag_e'});
+        _isDragging = false;
+      }
+      _isPotentialDrag = false;
+      _maxPointerCount = 0;
+      _hasMoved = false;
+      _activePointers.clear();
+      _lastAbsSent = null;
+      _lastAbsSendTime = 0;
     }
   }
 
@@ -591,6 +906,30 @@ class _ControlScreenState extends State<ControlScreen> {
     return _streamCandidates[_activeStreamCandidate];
   }
 
+  int get _maxCandidateStartupRetries {
+    final candidate = _currentStreamCandidate;
+    if (candidate == null) return 1;
+    if (candidate.transport == _StreamTransport.mpegTs) return 1;
+    return 1;
+  }
+
+  int _startupTimeoutMsForCandidate(
+    _StreamCandidate candidate, {
+    required int retryAttempt,
+  }) {
+    final policyMs = _fallbackPolicy.candidateTimeoutMs.clamp(1600, 12000);
+    final retry = max(0, retryAttempt);
+
+    if (candidate.transport == _StreamTransport.mpegTs) {
+      const baseMs = 3400;
+      final withRetry = baseMs + (retry * 1200);
+      return max(policyMs, min(withRetry, 9800));
+    }
+
+    final baseMs = 2400 + (retry * 700);
+    return max(policyMs, min(baseMs, 7000));
+  }
+
   Uri _legacyMjpegUri({
     required int maxWidth,
     required int quality,
@@ -606,6 +945,10 @@ class _ControlScreenState extends State<ControlScreen> {
         'low_latency': _settings.lowLatency ? '1' : '0',
       },
     );
+  }
+
+  Uri _audioRelayUri() {
+    return _apiClient.uri('/audio_stream');
   }
 
   Uri _resolveCandidateUri(String raw) {
@@ -653,11 +996,33 @@ class _ControlScreenState extends State<ControlScreen> {
           c.transport == _StreamTransport.mpegTs &&
           (_candidateFailureCount[c.signature] ?? 0) < 2,
     );
+    _StreamCandidate? firstHealthyTs;
+    if (hasHealthyMpegTs) {
+      for (final c in withFailures) {
+        if (c.transport == _StreamTransport.mpegTs &&
+            (_candidateFailureCount[c.signature] ?? 0) < 2) {
+          firstHealthyTs = c;
+          break;
+        }
+      }
+    }
 
     final preferredSignature = _lastReadyCandidateSignature.isNotEmpty
         ? _lastReadyCandidateSignature
         : _preferredCandidateSignature;
-    if (preferredSignature.isEmpty) return withFailures;
+    if (preferredSignature.isEmpty) {
+      if (firstHealthyTs != null &&
+          withFailures.first.signature != firstHealthyTs.signature) {
+        final out = <_StreamCandidate>[firstHealthyTs];
+        for (final c in withFailures) {
+          if (c.signature == firstHealthyTs.signature) continue;
+          out.add(c);
+        }
+        _log('prefer healthy TS candidate first: ${firstHealthyTs.signature}');
+        return out;
+      }
+      return withFailures;
+    }
 
     final idx =
         withFailures.indexWhere((c) => c.signature == preferredSignature);
@@ -666,6 +1031,21 @@ class _ControlScreenState extends State<ControlScreen> {
     final preferred = withFailures[idx];
     final preferredFailures = _candidateFailureCount[preferred.signature] ?? 0;
     if (preferredFailures >= 3) return withFailures;
+    if (firstHealthyTs != null &&
+        preferred.transport != _StreamTransport.mpegTs) {
+      if (withFailures.first.signature != firstHealthyTs.signature) {
+        final out = <_StreamCandidate>[firstHealthyTs];
+        for (final c in withFailures) {
+          if (c.signature == firstHealthyTs.signature) continue;
+          out.add(c);
+        }
+        _log(
+          'ignore preferred MJPEG and pin healthy TS first: ${firstHealthyTs.signature}',
+        );
+        return out;
+      }
+      return withFailures;
+    }
 
     // Prefer last known-good candidate first to minimize startup latency.
     if (hasHealthyMpegTs && preferred.transport != _StreamTransport.mpegTs) {
@@ -720,7 +1100,7 @@ class _ControlScreenState extends State<ControlScreen> {
         '/api/stream_offer',
         queryParameters: <String, String>{
           'low_latency': _settings.lowLatency ? '1' : '0',
-          'audio': '1',
+          'audio': '0',
           'max_w': _adaptiveParams.maxWidth.toString(),
           'quality': _adaptiveParams.quality.toString(),
           'fps': _adaptiveParams.fps.toString(),
@@ -871,6 +1251,23 @@ class _ControlScreenState extends State<ControlScreen> {
     setState(() {
       _activeStreamCandidate = next;
       _candidateStartupRetries = 0;
+      _readyTransientFailureCount = 0;
+      _lastReadyTransientFailureAtMs = 0;
+      _streamWidgetNonce++;
+      _streamStatus = reason;
+      _resetStreamMetrics();
+    });
+    _armCandidateStartupTimeout();
+  }
+
+  void _restartCurrentCandidate(String reason) {
+    if (!mounted || _currentStreamCandidate == null) return;
+    _log('restart current candidate: $reason');
+    _candidateTimeoutTimer?.cancel();
+    _streamReconnectTimer?.cancel();
+    _streamReconnectTimer = null;
+    setState(() {
+      _candidateStartupRetries = 0;
       _streamWidgetNonce++;
       _streamStatus = reason;
       _resetStreamMetrics();
@@ -883,6 +1280,8 @@ class _ControlScreenState extends State<ControlScreen> {
     _candidateReady = true;
     _candidateReadyAtMs = DateTime.now().millisecondsSinceEpoch;
     _candidateStartupRetries = 0;
+    _readyTransientFailureCount = 0;
+    _lastReadyTransientFailureAtMs = 0;
     _candidateTimeoutTimer?.cancel();
     _streamReconnectTimer?.cancel();
     _streamReconnectTimer = null;
@@ -908,16 +1307,10 @@ class _ControlScreenState extends State<ControlScreen> {
     final candidate = _currentStreamCandidate;
     if (candidate == null) return;
 
-    final policyMs = _fallbackPolicy.candidateTimeoutMs.clamp(1600, 12000);
-    final preferredSignature = _lastReadyCandidateSignature.isNotEmpty
-        ? _lastReadyCandidateSignature
-        : _preferredCandidateSignature;
-    final isPreferred = preferredSignature.isNotEmpty &&
-        candidate.signature == preferredSignature;
-    // Fast first try for cold-start; if first frame doesn't arrive, fallback quickly.
-    final timeoutMs = _candidateStartupRetries <= 0
-        ? (isPreferred ? min(policyMs, 1800) : min(policyMs, 2200))
-        : policyMs;
+    final timeoutMs = _startupTimeoutMsForCandidate(
+      candidate,
+      retryAttempt: _candidateStartupRetries,
+    );
     _candidateTimeoutTimer = Timer(Duration(milliseconds: timeoutMs), () {
       if (!_candidateReady) {
         _handleCandidateFailure('candidate timeout (${timeoutMs}ms)');
@@ -928,6 +1321,7 @@ class _ControlScreenState extends State<ControlScreen> {
   void _handleCandidateFailure(String reason) {
     final normalized = reason.toLowerCase();
     final candidate = _currentStreamCandidate;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     if (candidate != null) {
       final prev = _candidateFailureCount[candidate.signature] ?? 0;
       _candidateFailureCount[candidate.signature] = prev + 1;
@@ -940,11 +1334,38 @@ class _ControlScreenState extends State<ControlScreen> {
           normalized.contains('playback') ||
           normalized.contains('error');
       if (transientFailure) {
-        final ageMs = _candidateReadyAtMs <= 0
-            ? -1
-            : DateTime.now().millisecondsSinceEpoch - _candidateReadyAtMs;
+        final ageMs =
+            _candidateReadyAtMs <= 0 ? -1 : nowMs - _candidateReadyAtMs;
         _log(
             'ignore transient failure on ready candidate age=${ageMs}ms: $reason');
+        if (candidate?.transport == _StreamTransport.mpegTs) {
+          final restartAgo = _lastReadyTransientRestartAtMs <= 0
+              ? 1 << 30
+              : nowMs - _lastReadyTransientRestartAtMs;
+          if (restartAgo >= _readyTransientRestartCooldownMs) {
+            _lastReadyTransientRestartAtMs = nowMs;
+            _restartCurrentCandidate('recovering stream...');
+            return;
+          }
+        } else {
+          final inWindow = _lastReadyTransientFailureAtMs > 0 &&
+              (nowMs - _lastReadyTransientFailureAtMs) <=
+                  _readyTransientFailureWindowMs;
+          _readyTransientFailureCount =
+              inWindow ? (_readyTransientFailureCount + 1) : 1;
+          _lastReadyTransientFailureAtMs = nowMs;
+          final restartAgo = _lastReadyTransientRestartAtMs <= 0
+              ? 1 << 30
+              : nowMs - _lastReadyTransientRestartAtMs;
+          if (_readyTransientFailureCount >=
+                  _readyTransientFailureEscalateCount &&
+              restartAgo >= _readyTransientRestartCooldownMs) {
+            _readyTransientFailureCount = 0;
+            _lastReadyTransientRestartAtMs = nowMs;
+            _restartCurrentCandidate('recovering stream...');
+            return;
+          }
+        }
         if (mounted && _streamStatus.isEmpty) {
           setState(() => _streamStatus = 'stream hiccup, waiting recovery...');
         }
@@ -1000,8 +1421,7 @@ class _ControlScreenState extends State<ControlScreen> {
         return;
       }
 
-      final noTraffic = _streamKbps <= 2.0 && _lastFrameKb <= 0;
-      if (_streamFps <= 0.1 && noTraffic) {
+      if (_streamFps <= 0.1) {
         _stallZeroFpsSeconds++;
       } else {
         _stallZeroFpsSeconds = 0;
@@ -1020,6 +1440,7 @@ class _ControlScreenState extends State<ControlScreen> {
       if (_resolvingStreamOffer || !_candidateReady) return;
       final effectiveFps = _effectiveFpsForAdaptive();
       if (effectiveFps <= 0.1) return;
+      _pushStreamFeedback(effectiveFps);
       final nowMs = DateTime.now().millisecondsSinceEpoch;
 
       final decision = _adaptiveController.evaluate(
@@ -1072,22 +1493,19 @@ class _ControlScreenState extends State<ControlScreen> {
       if (next == _adaptiveParams) return;
       final previousParams = _adaptiveParams;
       final widthChanged = next.maxWidth != previousParams.maxWidth;
-      if (!widthChanged) {
-        _log(
-          'adaptive skipped non-width change: '
-          'q/f ${previousParams.quality}/${previousParams.fps}'
-          '->${next.quality}/${next.fps}',
-        );
-        return;
-      }
+      final qualityChanged = next.quality != previousParams.quality;
+      final fpsChanged = next.fps != previousParams.fps;
       setState(() {
         _adaptiveParams = next;
-        _streamStatus = widthChanged
-            ? 'adaptive ${decision.reasonLabel} ${decision.oldWidth}->${decision.newWidth}'
-            : 'adaptive ${decision.reasonLabel} '
-                'q/f ${previousParams.quality}/${previousParams.fps}'
-                '->${next.quality}/${next.fps}';
+        _streamStatus = 'adaptive ${decision.reasonLabel} '
+            'w ${previousParams.maxWidth}->${next.maxWidth} '
+            'q ${previousParams.quality}->${next.quality} '
+            'fps ${previousParams.fps}->${next.fps}';
       });
+      _log(
+        'adaptive apply profile: '
+        'widthChanged=$widthChanged qualityChanged=$qualityChanged fpsChanged=$fpsChanged',
+      );
       _lastAdaptiveResolveAtMs = nowMs;
       unawaited(_resolveStreamCandidates(reason: _streamStatus));
     });
@@ -1138,7 +1556,10 @@ class _ControlScreenState extends State<ControlScreen> {
     final candidate = _currentStreamCandidate;
     final renderFps = _streamRenderFps > 0 ? _streamRenderFps : _streamFps;
     if (candidate?.transport != _StreamTransport.mjpeg) {
-      return renderFps;
+      // TS path usually doesn't expose frame stats; use target fps so RTT-based
+      // adaptation still works instead of being disabled.
+      if (renderFps > 0.1) return renderFps;
+      return _adaptiveParams.fps.toDouble();
     }
 
     final target = _adaptiveParams.fps.toDouble();
@@ -1153,13 +1574,51 @@ class _ControlScreenState extends State<ControlScreen> {
     return renderFps;
   }
 
+  void _pushStreamFeedback(double effectiveFps) {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (_streamFeedbackInFlight) return;
+    if ((nowMs - _lastStreamFeedbackAtMs) < 1800) return;
+    _lastStreamFeedbackAtMs = nowMs;
+    _streamFeedbackInFlight = true;
+
+    final rttMs = max(0.0, _currentRttMs);
+    final jitterMs =
+        (_wsRttMs > 0 && _apiRttMs > 0) ? (_wsRttMs - _apiRttMs).abs() : 0.0;
+    final candidate = _currentStreamCandidate;
+    final dropRatio = candidate?.transport == _StreamTransport.mjpeg
+        ? _streamDuplicateRatio.clamp(0.0, 0.98)
+        : (rttMs >= _adaptiveHint.rttHighMs ? 0.2 : 0.0);
+
+    unawaited(() async {
+      try {
+        await _apiClient.post(
+          '/api/stream_feedback',
+          queryParameters: <String, String>{
+            'rtt_ms': rttMs.toStringAsFixed(1),
+            'jitter_ms': jitterMs.toStringAsFixed(1),
+            'drop_ratio': dropRatio.toStringAsFixed(3),
+            'decode_fps': max(0.0, effectiveFps).toStringAsFixed(2),
+          },
+          timeout: const Duration(seconds: 1),
+        );
+      } catch (_) {
+        // Best-effort telemetry only.
+      } finally {
+        _streamFeedbackInFlight = false;
+      }
+    }());
+  }
+
   int _mjpegDecodeCacheWidth(BuildContext context) {
     final mq = MediaQuery.maybeOf(context);
     if (mq == null) return min(_adaptiveParams.maxWidth, 1280);
     final longestSide = max(mq.size.width, mq.size.height);
     final dpr = mq.devicePixelRatio <= 0 ? 1.0 : mq.devicePixelRatio;
     final screenPx = (longestSide * dpr).round();
-    final targetPx = min(1440, max(960, screenPx));
+    final decodeCap = _lastDecodeMs >= 28
+        ? 900
+        : (_lastDecodeMs >= 22 || _streamRenderFps < 24 ? 1024 : 1280);
+    final targetPx = min(decodeCap, max(800, screenPx));
     return max(640, min(_adaptiveParams.maxWidth, targetPx));
   }
 
@@ -1256,14 +1715,18 @@ class _ControlScreenState extends State<ControlScreen> {
 
     switch (candidate.transport) {
       case _StreamTransport.mpegTs:
+        final startupMs = _startupTimeoutMsForCandidate(
+          candidate,
+          retryAttempt: _candidateStartupRetries,
+        );
         return TsStreamView(
           key: key,
           streamUrl: candidate.uri.toString(),
           headers: <String, String>{
             'Authorization': 'Bearer ${widget.token}',
           },
-          startupTimeout:
-              Duration(milliseconds: _fallbackPolicy.candidateTimeoutMs),
+          startupTimeout: Duration(milliseconds: startupMs),
+          lowLatency: _settings.lowLatency,
           onReady: _markCandidateReady,
           onVideoSize: (sz) {
             if (!mounted) return;
@@ -1321,6 +1784,36 @@ class _ControlScreenState extends State<ControlScreen> {
     }
   }
 
+  bool get _shouldPlayAudioRelay {
+    if (!_settings.streamAudio) return false;
+    if (!_isConnected) return false;
+    return true;
+  }
+
+  Widget _buildAudioRelayWidget() {
+    if (!_shouldPlayAudioRelay) return const SizedBox.shrink();
+    return AudioRelayView(
+      streamUrl: _audioRelayUri().toString(),
+      headers: <String, String>{
+        'Authorization': 'Bearer ${widget.token}',
+      },
+      enabled: true,
+      startupTimeout: const Duration(seconds: 12),
+      onReady: () {
+        if (!mounted || _audioRelayStatus.isEmpty) return;
+        _log('audio relay ready');
+        setState(() => _audioRelayStatus = '');
+      },
+      onFailure: (reason) {
+        if (!mounted || !_settings.streamAudio) return;
+        final status = 'audio relay failed: $reason';
+        if (_audioRelayStatus == status) return;
+        _log(status);
+        setState(() => _audioRelayStatus = status);
+      },
+    );
+  }
+
   String _streamDetailsLabel() {
     final candidate = _currentStreamCandidate;
     if (candidate == null) return 'No stream';
@@ -1350,7 +1843,7 @@ class _ControlScreenState extends State<ControlScreen> {
       '/api/stream_offer',
       query: <String, String>{
         'low_latency': _settings.lowLatency ? '1' : '0',
-        'audio': '1',
+        'audio': '0',
         'max_w': _adaptiveParams.maxWidth.toString(),
         'quality': _adaptiveParams.quality.toString(),
         'fps': _adaptiveParams.fps.toString(),
@@ -1491,6 +1984,13 @@ class _ControlScreenState extends State<ControlScreen> {
               ),
             ),
           ),
+          Positioned(
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            child: _buildAudioRelayWidget(),
+          ),
           Positioned.fill(
             child: LayoutBuilder(
               builder: (context, constraints) {
@@ -1499,178 +1999,314 @@ class _ControlScreenState extends State<ControlScreen> {
                   onPointerDown: _handlePointerDown,
                   onPointerMove: _handlePointerMove,
                   onPointerUp: _handlePointerUp,
+                  onPointerCancel: _handlePointerCancel,
                   child: Container(color: Colors.transparent),
                 );
               },
             ),
           ),
           SafeArea(
-            child: Column(
-              children: [
-                _glassPanel(
-                  margin: const EdgeInsets.fromLTRB(10, 10, 10, 0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          _iconBtn(
-                            Icons.arrow_back,
-                            tooltip: 'Back',
-                            onTap: () => Navigator.pop(context),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Row(
-                                  children: [
-                                    Container(
-                                      width: 8,
-                                      height: 8,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: _isConnected
-                                            ? kAccentColor
-                                            : Colors.redAccent,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+              child: Column(
+                children: [
+                  _glassPanel(
+                    margin: EdgeInsets.zero,
+                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+                    radius: BorderRadius.circular(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            _iconBtn(
+                              Icons.arrow_back,
+                              tooltip: 'Back',
+                              compact: true,
+                              onTap: () => Navigator.pop(context),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Container(
+                                        width: 8,
+                                        height: 8,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: _isConnected
+                                              ? kAccentColor
+                                              : Colors.redAccent,
+                                        ),
                                       ),
-                                    ),
-                                    const SizedBox(width: 6),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        _isConnected ? 'CONNECTED' : 'OFFLINE',
+                                        style: TextStyle(
+                                          color: _isConnected
+                                              ? kAccentColor
+                                              : Colors.redAccent,
+                                          fontWeight: FontWeight.w800,
+                                          letterSpacing: 0.28,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  if (!_showHudDetails) ...[
+                                    const SizedBox(height: 2),
                                     Text(
-                                      _isConnected ? 'CONNECTED' : 'OFFLINE',
-                                      style: TextStyle(
-                                        color: _isConnected
-                                            ? kAccentColor
-                                            : Colors.redAccent,
-                                        fontWeight: FontWeight.w800,
-                                        letterSpacing: 0.3,
+                                      _streamDetailsLabel(),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.white70,
                                       ),
                                     ),
                                   ],
+                                ],
+                              ),
+                            ),
+                            if (_debugModeEnabled) ...[
+                              const SizedBox(width: 6),
+                              _iconBtn(
+                                Icons.bug_report,
+                                tooltip: 'Diagnostics',
+                                color: Colors.lightBlueAccent,
+                                compact: true,
+                                onTap: _openDiagnostics,
+                              ),
+                            ],
+                            const SizedBox(width: 6),
+                            _iconBtn(
+                              _showHudDetails
+                                  ? Icons.keyboard_arrow_up
+                                  : Icons.tune,
+                              tooltip: _showHudDetails
+                                  ? 'Hide stream stats'
+                                  : 'Show stream stats',
+                              active: _showHudDetails,
+                              compact: true,
+                              onTap: () => setState(
+                                () => _showHudDetails = !_showHudDetails,
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_streamStatus.isNotEmpty ||
+                            _audioRelayStatus.isNotEmpty ||
+                            _showHudDetails) ...[
+                          const SizedBox(height: 8),
+                          if (_streamStatus.isNotEmpty)
+                            Text(
+                              _streamStatus,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.orangeAccent,
+                              ),
+                            ),
+                          if (_audioRelayStatus.isNotEmpty) ...[
+                            if (_streamStatus.isNotEmpty)
+                              const SizedBox(height: 4),
+                            Text(
+                              _audioRelayStatus,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.orangeAccent,
+                              ),
+                            ),
+                          ],
+                          if (_showHudDetails) ...[
+                            if (_streamStatus.isNotEmpty ||
+                                _audioRelayStatus.isNotEmpty)
+                              const SizedBox(height: 8),
+                            SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: [
+                                  _metricChip(
+                                    'FPS',
+                                    _streamFps.toStringAsFixed(0),
+                                    valueColor: _streamFps >= 24
+                                        ? kAccentColor
+                                        : Colors.amber,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  _metricChip(
+                                    'RTT',
+                                    '${_currentRttMs.toStringAsFixed(0)} ms',
+                                  ),
+                                  const SizedBox(width: 6),
+                                  _metricChip(
+                                    'RATE',
+                                    '${_streamKbps.toStringAsFixed(0)} kbps',
+                                  ),
+                                  const SizedBox(width: 6),
+                                  _metricChip('DEC', '$_lastDecodeMs ms'),
+                                  if (_debugModeEnabled) ...[
+                                    const SizedBox(width: 6),
+                                    _metricChip('CPU', _cpu),
+                                  ],
+                                  if (_debugModeEnabled && _ram.isNotEmpty) ...[
+                                    const SizedBox(width: 6),
+                                    _metricChip('RAM', _ram),
+                                  ],
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                _iconBtn(
+                                  _pcMuted
+                                      ? Icons.volume_off
+                                      : Icons.volume_mute,
+                                  tooltip: _pcMuted ? 'Unmute PC' : 'Mute PC',
+                                  active: _pcMuted,
+                                  color: _pcMuted
+                                      ? Colors.redAccent
+                                      : Colors.white70,
+                                  compact: true,
+                                  onTap: _togglePcMute,
                                 ),
-                                const SizedBox(height: 3),
-                                Text(
-                                  _streamDetailsLabel(),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.white70,
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: SliderTheme(
+                                    data: SliderTheme.of(context).copyWith(
+                                      trackHeight: 3,
+                                      thumbShape: const RoundSliderThumbShape(
+                                          enabledThumbRadius: 7),
+                                      overlayShape:
+                                          const RoundSliderOverlayShape(
+                                              overlayRadius: 12),
+                                    ),
+                                    child: Slider(
+                                      value: _pcVolumeUi.clamp(0, 100),
+                                      min: 0,
+                                      max: 100,
+                                      divisions: 100,
+                                      activeColor: kAccentColor,
+                                      inactiveColor: Colors.white24,
+                                      onChanged: _volumeBusy
+                                          ? null
+                                          : _onVolumeUiChanged,
+                                      onChangeEnd: (v) =>
+                                          unawaited(_applyPcVolume(v)),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                SizedBox(
+                                  width: 38,
+                                  child: Text(
+                                    '${_pcVolumeUi.round()}%',
+                                    textAlign: TextAlign.right,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.white70,
+                                      fontWeight: FontWeight.w700,
+                                    ),
                                   ),
                                 ),
                               ],
                             ),
-                          ),
-                          if (_debugModeEnabled) ...[
-                            const SizedBox(width: 8),
-                            _iconBtn(
-                              Icons.bug_report,
-                              tooltip: 'Diagnostics',
-                              color: Colors.lightBlueAccent,
-                              onTap: _openDiagnostics,
-                            ),
                           ],
                         ],
-                      ),
-                      if (_streamStatus.isNotEmpty) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          _streamStatus,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Colors.orangeAccent,
-                          ),
-                        ),
                       ],
-                      const SizedBox(height: 10),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          _metricChip(
-                            'FPS',
-                            _streamFps.toStringAsFixed(0),
-                            valueColor:
-                                _streamFps >= 24 ? kAccentColor : Colors.amber,
-                          ),
-                          _metricChip(
-                            'RTT',
-                            '${_currentRttMs.toStringAsFixed(0)} ms',
-                          ),
-                          _metricChip(
-                            'RATE',
-                            '${_streamKbps.toStringAsFixed(0)} kbps',
-                          ),
-                          if (_debugModeEnabled) _metricChip('CPU', _cpu),
-                          if (_debugModeEnabled && _ram.isNotEmpty)
-                            _metricChip('RAM', _ram),
-                        ],
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-                const Spacer(),
-                _glassPanel(
-                  margin: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-                  radius: BorderRadius.circular(16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
+                  const Spacer(),
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: _glassPanel(
+                      margin: EdgeInsets.zero,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 6,
+                      ),
+                      radius: BorderRadius.circular(18),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          Expanded(
-                            child: _dockBtn(
-                              icon: Icons.keyboard,
-                              label: _showKeyboard ? 'Hide keys' : 'Keyboard',
-                              active: _showKeyboard,
-                              onTap: () => setState(
-                                () => _showKeyboard = !_showKeyboard,
-                              ),
+                          _iconBtn(
+                            Icons.keyboard,
+                            tooltip: _showKeyboard ? 'Hide keys' : 'Keyboard',
+                            active: _showKeyboard,
+                            color:
+                                _showKeyboard ? kAccentColor : Colors.white70,
+                            compact: true,
+                            onTap: () => setState(
+                              () => _showKeyboard = !_showKeyboard,
                             ),
+                          ),
+                          const SizedBox(width: 6),
+                          _iconBtn(
+                            Icons.rotate_right,
+                            tooltip: 'Rotate stream',
+                            color: Colors.amber,
+                            compact: true,
+                            onTap: () =>
+                                setState(() => _rot = (_rot + 90) % 360),
+                          ),
+                          const SizedBox(width: 6),
+                          _iconBtn(
+                            _settings.streamAudio
+                                ? Icons.volume_up
+                                : Icons.volume_off,
+                            tooltip: _settings.streamAudio
+                                ? 'Stream audio: ON'
+                                : 'Stream audio: OFF',
+                            active: _settings.streamAudio,
+                            color: _settings.streamAudio
+                                ? kAccentColor
+                                : Colors.orangeAccent,
+                            compact: true,
+                            onTap: () => unawaited(_toggleStreamAudio()),
                           ),
                           const SizedBox(width: 8),
-                          Expanded(
-                            child: _dockBtn(
-                              icon: Icons.rotate_right,
-                              label: 'Rotate',
-                              iconColor: Colors.amber,
-                              onTap: () =>
-                                  setState(() => _rot = (_rot + 90) % 360),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _modeToggleBtn(
-                              icon: Icons.mouse,
-                              label: 'Touchpad',
-                              active: !_isTabletControlMode,
-                              onTap: () =>
-                                  unawaited(_setControlMode('touchpad')),
-                            ),
+                          Container(
+                            width: 1,
+                            height: 20,
+                            color: Colors.white12,
                           ),
                           const SizedBox(width: 8),
-                          Expanded(
-                            child: _modeToggleBtn(
-                              icon: Icons.touch_app,
-                              label: 'Tablet',
-                              active: _isTabletControlMode,
-                              onTap: () => unawaited(_setControlMode('tablet')),
-                            ),
+                          _iconBtn(
+                            Icons.mouse,
+                            tooltip: 'Touchpad mode',
+                            active: !_isTabletControlMode,
+                            color: !_isTabletControlMode
+                                ? kAccentColor
+                                : Colors.white70,
+                            compact: true,
+                            onTap: () => unawaited(_setControlMode('touchpad')),
+                          ),
+                          const SizedBox(width: 6),
+                          _iconBtn(
+                            Icons.touch_app,
+                            tooltip: 'Tablet mode',
+                            active: _isTabletControlMode,
+                            color: _isTabletControlMode
+                                ? kAccentColor
+                                : Colors.white70,
+                            compact: true,
+                            onTap: () => unawaited(_setControlMode('tablet')),
                           ),
                         ],
                       ),
-                    ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           AnimatedPositioned(
@@ -1827,15 +2463,27 @@ class _ControlScreenState extends State<ControlScreen> {
     );
   }
 
-  Widget _glassPanel(
-          {required Widget child, EdgeInsets? margin, BorderRadius? radius}) =>
+  Widget _glassPanel({
+    required Widget child,
+    EdgeInsets? margin,
+    EdgeInsets? padding,
+    BorderRadius? radius,
+    Color? color,
+  }) =>
       Container(
         margin: margin ?? const EdgeInsets.all(10),
-        padding: const EdgeInsets.all(8),
+        padding: padding ?? const EdgeInsets.all(8),
         decoration: BoxDecoration(
-          color: const Color(0xD9121212),
-          border: Border.all(color: Colors.white10),
+          color: color ?? const Color(0xB90B1310),
+          border: Border.all(color: const Color(0x4D38E89D)),
           borderRadius: radius ?? BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.35),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+          ],
         ),
         child: child,
       );
@@ -1845,21 +2493,28 @@ class _ControlScreenState extends State<ControlScreen> {
     required VoidCallback onTap,
     String? tooltip,
     Color color = Colors.white,
+    bool active = false,
+    bool compact = false,
   }) {
+    final size = compact ? 34.0 : 40.0;
+    final radius = compact ? 11.0 : 12.0;
+    final borderColor =
+        active ? kAccentColor.withValues(alpha: 0.9) : const Color(0xFF2E3F36);
+    final bgColor = active ? const Color(0xD0123226) : const Color(0xC0101713);
     final btn = Material(
-      color: const Color(0xFF141414),
-      borderRadius: BorderRadius.circular(10),
+      color: bgColor,
+      borderRadius: BorderRadius.circular(radius),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(radius),
         child: Container(
-          width: 42,
-          height: 42,
+          width: size,
+          height: size,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0xFF2D2D2D)),
+            borderRadius: BorderRadius.circular(radius),
+            border: Border.all(color: borderColor),
           ),
-          child: Icon(icon, color: color, size: 22),
+          child: Icon(icon, color: color, size: compact ? 18 : 21),
         ),
       ),
     );
@@ -1874,12 +2529,12 @@ class _ControlScreenState extends State<ControlScreen> {
     Color valueColor = Colors.white,
   }) {
     return Container(
-      constraints: const BoxConstraints(minWidth: 86),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      constraints: const BoxConstraints(minWidth: 74),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
       decoration: BoxDecoration(
-        color: const Color(0xFF141414),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFF2A2A2A)),
+        color: const Color(0xCC101914),
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: const Color(0xFF2B4035)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1888,7 +2543,7 @@ class _ControlScreenState extends State<ControlScreen> {
           Text(
             label,
             style: const TextStyle(
-              fontSize: 10,
+              fontSize: 9,
               color: Colors.white54,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.3,
@@ -1898,72 +2553,13 @@ class _ControlScreenState extends State<ControlScreen> {
           Text(
             value,
             style: TextStyle(
-              fontSize: 12,
+              fontSize: 11,
               color: valueColor,
               fontWeight: FontWeight.w700,
             ),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _dockBtn({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-    bool active = false,
-    Color iconColor = Colors.white,
-  }) {
-    final borderColor = active ? kAccentColor : const Color(0xFF2D2D2D);
-    final background =
-        active ? const Color(0xFF103527) : const Color(0xFF141414);
-    return SizedBox(
-      height: 52,
-      child: Material(
-        color: background,
-        borderRadius: BorderRadius.circular(12),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(12),
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: borderColor),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, size: 18, color: active ? kAccentColor : iconColor),
-                const SizedBox(width: 7),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: active ? kAccentColor : Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _modeToggleBtn({
-    required IconData icon,
-    required String label,
-    required bool active,
-    required VoidCallback onTap,
-  }) {
-    return _dockBtn(
-      icon: icon,
-      label: label,
-      onTap: onTap,
-      active: active,
-      iconColor: Colors.white70,
     );
   }
 
@@ -2043,6 +2639,12 @@ class _CursorPainter extends CustomPainter {
 enum _StreamTransport {
   mpegTs,
   mjpeg,
+}
+
+enum _TwoFingerGesture {
+  idle,
+  scroll,
+  zoom,
 }
 
 class _StreamCandidate {

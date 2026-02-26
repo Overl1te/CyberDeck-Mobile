@@ -15,6 +15,7 @@ import 'l10n/app_localizations.dart';
 import 'network/api_client.dart';
 import 'network/host_port.dart';
 import 'network/protocol_service.dart';
+import 'services/system_notifications.dart';
 import 'services/transfer_service.dart';
 import 'theme.dart';
 import 'widgets/cyber_background.dart';
@@ -30,6 +31,10 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _isOnline = false;
   bool _checking = true;
+  bool _httpOnline = false;
+  bool _wsOnline = false;
+  DateTime? _lastWsDisconnectAt;
+  Timer? _statusPollTimer;
   DeviceSettings _settings = DeviceSettings.defaults();
   final ProtocolService _protocolService = ProtocolService();
   ControlConnectionController? _wsController;
@@ -65,17 +70,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     _loadSettings();
-    _checkStatus();
+    unawaited(_checkStatus());
+    _statusPollTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      unawaited(_checkStatus(silent: true));
+    });
     unawaited(_connectWs());
   }
 
   @override
   void dispose() {
-    final controller = _wsController;
-    if (controller != null) {
-      controller.isConnected.removeListener(_onWsStateChanged);
-      unawaited(controller.dispose());
-    }
+    _statusPollTimer?.cancel();
+    unawaited(_disposeWsController(updateState: false));
     super.dispose();
   }
 
@@ -120,29 +125,89 @@ class _DashboardScreenState extends State<DashboardScreen> {
     controller.start();
   }
 
+  Future<void> _disposeWsController({bool updateState = true}) async {
+    final controller = _wsController;
+    if (controller == null) return;
+    controller.isConnected.removeListener(_onWsStateChanged);
+    _wsController = null;
+    _wsOnline = false;
+    if (updateState) {
+      _updateOnlineState();
+    }
+    await controller.dispose();
+  }
+
+  Future<void> _openControlScreen() async {
+    await _disposeWsController();
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ControlScreen(
+          ip: _host,
+          token: widget.device.token,
+          deviceId: widget.device.id,
+          scheme: widget.device.scheme,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _connectWs();
+  }
+
   void _onWsStateChanged() {
     if (!mounted) return;
     final connected = _wsController?.isConnected.value ?? false;
-    if (_isOnline == connected) return;
-    setState(() => _isOnline = connected);
+    if (_wsOnline == connected) return;
+    _wsOnline = connected;
+    if (!connected) {
+      _lastWsDisconnectAt = DateTime.now();
+    }
+    _updateOnlineState();
+    if (connected) {
+      final disconnectedAt = _lastWsDisconnectAt;
+      final allowNotification = disconnectedAt == null ||
+          DateTime.now().difference(disconnectedAt) >=
+              const Duration(seconds: 30);
+      if (allowNotification) {
+        final displayName = _settings.alias.trim().isEmpty
+            ? widget.device.name
+            : _settings.alias.trim();
+        unawaited(
+          SystemNotifications.showDeviceConnected(
+            title: _l10n.deviceConnectedNotificationTitle,
+            body: _l10n.deviceConnectedNotificationBody(displayName),
+          ),
+        );
+      }
+    }
   }
 
-  Future<void> _checkStatus() async {
-    if (mounted) setState(() => _checking = true);
+  void _updateOnlineState() {
+    if (!mounted) return;
+    final nextOnline = _httpOnline || _wsOnline;
+    if (_isOnline == nextOnline) return;
+    setState(() => _isOnline = nextOnline);
+  }
+
+  Future<void> _checkStatus({bool silent = false}) async {
+    if (mounted && !silent) setState(() => _checking = true);
     final api = _api();
     try {
       final response =
           await api.get('/api/stats', timeout: const Duration(seconds: 2));
       if (!mounted) return;
+      _httpOnline = response.statusCode == 200;
+      _updateOnlineState();
       setState(() {
-        _isOnline = response.statusCode == 200;
-        _checking = false;
+        if (!silent) _checking = false;
       });
     } catch (_) {
       if (!mounted) return;
+      _httpOnline = false;
+      _updateOnlineState();
       setState(() {
-        _isOnline = false;
-        _checking = false;
+        if (!silent) _checking = false;
       });
     } finally {
       api.close();
@@ -326,21 +391,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     style: const TextStyle(
                         fontSize: 18, fontWeight: FontWeight.bold),
                   ),
-                  onPressed: _isOnline
-                      ? () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => ControlScreen(
-                                ip: _host,
-                                token: widget.device.token,
-                                deviceId: widget.device.id,
-                                scheme: widget.device.scheme,
-                              ),
-                            ),
-                          );
-                        }
-                      : null,
+                  onPressed: _isOnline ? _openControlScreen : null,
                 ),
               ),
               const SizedBox(height: 20),

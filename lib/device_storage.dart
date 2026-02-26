@@ -117,6 +117,7 @@ class DeviceSettings {
   final int streamFps;
   final bool showCursor;
   final bool lowLatency;
+  final bool streamAudio;
   final String controlMode;
 
   const DeviceSettings({
@@ -132,6 +133,7 @@ class DeviceSettings {
     required this.streamFps,
     required this.showCursor,
     required this.lowLatency,
+    required this.streamAudio,
     required this.controlMode,
   });
 
@@ -148,6 +150,7 @@ class DeviceSettings {
         streamFps: 60,
         showCursor: true,
         lowLatency: false,
+        streamAudio: true,
         controlMode: 'touchpad',
       );
 
@@ -164,6 +167,7 @@ class DeviceSettings {
     int? streamFps,
     bool? showCursor,
     bool? lowLatency,
+    bool? streamAudio,
     String? controlMode,
   }) {
     return DeviceSettings(
@@ -179,6 +183,7 @@ class DeviceSettings {
       streamFps: streamFps ?? this.streamFps,
       showCursor: showCursor ?? this.showCursor,
       lowLatency: lowLatency ?? this.lowLatency,
+      streamAudio: streamAudio ?? this.streamAudio,
       controlMode: _normalizeControlMode(controlMode ?? this.controlMode),
     );
   }
@@ -196,6 +201,7 @@ class DeviceSettings {
         'streamFps': streamFps,
         'showCursor': showCursor,
         'lowLatency': lowLatency,
+        'streamAudio': streamAudio,
         'controlMode': controlMode,
       };
 
@@ -212,6 +218,7 @@ class DeviceSettings {
         streamFps: (json['streamFps'] as num?)?.toInt() ?? 60,
         showCursor: json['showCursor'] as bool? ?? true,
         lowLatency: json['lowLatency'] as bool? ?? false,
+        streamAudio: json['streamAudio'] as bool? ?? true,
         controlMode: _normalizeControlMode(json['controlMode']?.toString()),
       );
 

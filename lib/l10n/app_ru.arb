@@ -23,6 +23,7 @@
   "qrLoginNotSupported": "QR-вход не поддерживается сервером",
   "qrTokenInvalidOrExpired": "QR-токен недействителен или устарел",
   "qrFallbackToHandshake": "QR-вход недоступен. Перехожу к подключению по PIN-коду.",
+  "approvalPendingOnDesktop": "Запрос на подключение отправлен. Подтвердите это устройство на ПК.",
   "tlsInsecureWarning": "TLS-соединение небезопасно или использует самоподписанный сертификат. Проверьте настройки сертификата на сервере.",
   "invalidResponseMissingToken": "Некорректный ответ: отсутствует токен",
   "invalidHostOrPort": "Некорректный хост или порт",
@@ -65,6 +66,20 @@
   "downloading": "Скачивание...",
   "savedFile": "Сохранено: {filename}",
   "@savedFile": {
+    "placeholders": {
+      "filename": {}
+    }
+  },
+  "deviceConnectedNotificationTitle": "Устройство подключено",
+  "deviceConnectedNotificationBody": "{device} теперь в сети",
+  "@deviceConnectedNotificationBody": {
+    "placeholders": {
+      "device": {}
+    }
+  },
+  "fileReceivedNotificationTitle": "Файл получен",
+  "fileReceivedNotificationBody": "Сохранен файл: {filename}",
+  "@fileReceivedNotificationBody": {
     "placeholders": {
       "filename": {}
     }

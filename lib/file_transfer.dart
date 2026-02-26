@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -9,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'device_storage.dart';
 import 'l10n/app_localizations.dart';
+import 'services/system_notifications.dart';
 import 'services/transfer_service.dart';
 import 'theme.dart';
 
@@ -190,12 +192,19 @@ class FileTransfer {
       );
 
       if (!context.mounted || canceled) return;
+      final savedName = file.path.split(Platform.pathSeparator).last;
+      unawaited(
+        SystemNotifications.showFileReceived(
+          title: l10n.fileReceivedNotificationTitle,
+          body: l10n.fileReceivedNotificationBody(savedName),
+        ),
+      );
       messenger.showSnackBar(
         SnackBar(
           content: Text(
             transferId.isEmpty
-                ? l10n.savedFile(file.path.split(Platform.pathSeparator).last)
-                : '${l10n.savedFile(file.path.split(Platform.pathSeparator).last)} (id: $transferId)',
+                ? l10n.savedFile(savedName)
+                : '${l10n.savedFile(savedName)} (id: $transferId)',
           ),
           backgroundColor: Colors.green,
           duration: const Duration(seconds: 5),

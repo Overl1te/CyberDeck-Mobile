@@ -206,6 +206,12 @@ abstract class AppLocalizations {
   /// **'QR login unavailable. Falling back to PIN handshake.'**
   String get qrFallbackToHandshake;
 
+  /// No description provided for @approvalPendingOnDesktop.
+  ///
+  /// In en, this message translates to:
+  /// **'Connection request sent. Approve this device on the PC.'**
+  String get approvalPendingOnDesktop;
+
   /// No description provided for @tlsInsecureWarning.
   ///
   /// In en, this message translates to:
@@ -361,6 +367,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Saved: {filename}'**
   String savedFile(Object filename);
+
+  /// No description provided for @deviceConnectedNotificationTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Device connected'**
+  String get deviceConnectedNotificationTitle;
+
+  /// No description provided for @deviceConnectedNotificationBody.
+  ///
+  /// In en, this message translates to:
+  /// **'{device} is now online'**
+  String deviceConnectedNotificationBody(Object device);
+
+  /// No description provided for @fileReceivedNotificationTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'File received'**
+  String get fileReceivedNotificationTitle;
+
+  /// No description provided for @fileReceivedNotificationBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Saved file: {filename}'**
+  String fileReceivedNotificationBody(Object filename);
 
   /// No description provided for @downloadErrorOpeningBrowser.
   ///

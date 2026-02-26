@@ -74,7 +74,12 @@ CyberdeckQrData? _parseCyberdeckQrUri(Uri uri) {
 
   if (!isCyberdeckScheme && !isCyberdeckTyped) {
     final maybeCode = qp['code'];
-    if (maybeCode == null || maybeCode.trim().isEmpty) return null;
+    final maybeQrToken = qp['qr_token'] ?? qp['token'];
+    final maybeNonce = qp['nonce'];
+    final hasCode = maybeCode != null && maybeCode.trim().isNotEmpty;
+    final hasQrToken = maybeQrToken != null && maybeQrToken.trim().isNotEmpty;
+    final hasNonce = maybeNonce != null && maybeNonce.trim().isNotEmpty;
+    if (!hasCode && !hasQrToken && !hasNonce) return null;
   }
 
   final host = (qp['host'] ?? qp['ip'] ?? qp['addr'])?.trim().isNotEmpty == true

@@ -68,6 +68,10 @@ class AppLocalizationsRu extends AppLocalizations {
       'QR-вход недоступен. Перехожу к подключению по PIN-коду.';
 
   @override
+  String get approvalPendingOnDesktop =>
+      'Запрос на подключение отправлен. Подтвердите это устройство на ПК.';
+
+  @override
   String get tlsInsecureWarning =>
       'TLS-соединение небезопасно или использует самоподписанный сертификат. Проверьте настройки сертификата на сервере.';
 
@@ -157,6 +161,22 @@ class AppLocalizationsRu extends AppLocalizations {
   @override
   String savedFile(Object filename) {
     return 'Сохранено: $filename';
+  }
+
+  @override
+  String get deviceConnectedNotificationTitle => 'Устройство подключено';
+
+  @override
+  String deviceConnectedNotificationBody(Object device) {
+    return '$device теперь в сети';
+  }
+
+  @override
+  String get fileReceivedNotificationTitle => 'Файл получен';
+
+  @override
+  String fileReceivedNotificationBody(Object filename) {
+    return 'Сохранен файл: $filename';
   }
 
   @override

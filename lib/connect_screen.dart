@@ -17,7 +17,12 @@ import 'theme.dart';
 import 'widgets/cyber_background.dart';
 
 class ConnectScreen extends StatefulWidget {
-  const ConnectScreen({super.key});
+  const ConnectScreen({
+    super.key,
+    this.initialQrRaw,
+  });
+
+  final String? initialQrRaw;
 
   @override
   State<ConnectScreen> createState() => _ConnectScreenState();
@@ -33,6 +38,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
   bool _isLoading = false;
   bool _isScanning = false;
   bool _qrBusy = false;
+  bool _initialQrHandled = false;
   final List<DiscoveredDevice> _foundDevices = <DiscoveredDevice>[];
   AppSettings _appSettings = AppSettings.defaults();
 
@@ -64,6 +70,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     if (_appSettings.autoScanOnConnect) {
       _startScan();
     }
+    await _processInitialQrIfNeeded();
   }
 
   String _formatHostPort(String host, int port) {
@@ -136,45 +143,56 @@ class _ConnectScreenState extends State<ConnectScreen> {
         MaterialPageRoute(builder: (_) => const QrScanScreen()),
       );
       if (!mounted || raw == null) return;
-
-      final parsed = parseCyberdeckQrPayload(raw);
-      if (parsed == null) {
-        _showError(_l10n.qrNotRecognized);
-        return;
-      }
-
-      if (parsed.host != null) {
-        final port = parsed.port ?? _appSettings.defaultPort;
-        _ipController.text = _formatHostPort(parsed.host!, port);
-      }
-      if (parsed.code != null) {
-        _codeController.text = parsed.code!;
-      }
-
-      if ((parsed.qrToken != null || parsed.nonce != null) &&
-          parsed.host != null) {
-        await _qrLogin(
-          host: parsed.host!,
-          port: parsed.port ?? _appSettings.defaultPort,
-          scheme: parsed.scheme,
-          qrToken: parsed.qrToken,
-          nonce: parsed.nonce,
-          fallbackCode: parsed.code,
-        );
-        return;
-      }
-
-      if (parsed.code != null && parsed.host != null) {
-        await _connect(
-          manualIp: _formatHostPort(
-            parsed.host!,
-            parsed.port ?? _appSettings.defaultPort,
-          ),
-          manualScheme: parsed.scheme,
-        );
-      }
+      await _processQrRaw(raw);
     } finally {
       if (mounted) setState(() => _qrBusy = false);
+    }
+  }
+
+  Future<void> _processInitialQrIfNeeded() async {
+    if (_initialQrHandled) return;
+    final raw = widget.initialQrRaw?.trim();
+    if (raw == null || raw.isEmpty) return;
+    _initialQrHandled = true;
+    await _processQrRaw(raw);
+  }
+
+  Future<void> _processQrRaw(String raw) async {
+    final parsed = parseCyberdeckQrPayload(raw);
+    if (parsed == null) {
+      _showError(_l10n.qrNotRecognized);
+      return;
+    }
+
+    if (parsed.host != null) {
+      final port = parsed.port ?? _appSettings.defaultPort;
+      _ipController.text = _formatHostPort(parsed.host!, port);
+    }
+    if (parsed.code != null) {
+      _codeController.text = parsed.code!;
+    }
+
+    if ((parsed.qrToken != null || parsed.nonce != null) &&
+        parsed.host != null) {
+      await _qrLogin(
+        host: parsed.host!,
+        port: parsed.port ?? _appSettings.defaultPort,
+        scheme: parsed.scheme,
+        qrToken: parsed.qrToken,
+        nonce: parsed.nonce,
+        fallbackCode: parsed.code,
+      );
+      return;
+    }
+
+    if (parsed.code != null && parsed.host != null) {
+      await _connect(
+        manualIp: _formatHostPort(
+          parsed.host!,
+          parsed.port ?? _appSettings.defaultPort,
+        ),
+        manualScheme: parsed.scheme,
+      );
     }
   }
 
@@ -233,6 +251,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
       }
       if (PairingService.isInvalidQrTokenError(e)) {
         _showError(_l10n.qrTokenInvalidOrExpired);
+        return;
+      }
+      if (PairingService.isApprovalPendingError(e)) {
+        _showError(_l10n.approvalPendingOnDesktop);
         return;
       }
       if (PairingService.isInsecureTlsError(e)) {
@@ -305,6 +327,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
       if (!mounted) return;
       _closeOrGoHome();
     } catch (e) {
+      if (PairingService.isApprovalPendingError(e)) {
+        _showError(_l10n.approvalPendingOnDesktop);
+        return;
+      }
       _showError(_l10n.connectionError(e.toString()));
     } finally {
       if (mounted) setState(() => _isLoading = false);

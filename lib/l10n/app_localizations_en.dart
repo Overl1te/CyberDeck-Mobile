@@ -67,6 +67,10 @@ class AppLocalizationsEn extends AppLocalizations {
       'QR login unavailable. Falling back to PIN handshake.';
 
   @override
+  String get approvalPendingOnDesktop =>
+      'Connection request sent. Approve this device on the PC.';
+
+  @override
   String get tlsInsecureWarning =>
       'TLS connection is insecure or uses a self-signed certificate. Verify server certificate settings.';
 
@@ -153,6 +157,22 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String savedFile(Object filename) {
     return 'Saved: $filename';
+  }
+
+  @override
+  String get deviceConnectedNotificationTitle => 'Device connected';
+
+  @override
+  String deviceConnectedNotificationBody(Object device) {
+    return '$device is now online';
+  }
+
+  @override
+  String get fileReceivedNotificationTitle => 'File received';
+
+  @override
+  String fileReceivedNotificationBody(Object filename) {
+    return 'Saved file: $filename';
   }
 
   @override

@@ -229,8 +229,8 @@ pubspec.yaml            # Зависимости (http, google_fonts, shared_pre
 
 ## Release & Update Check
 
-- Mobile app version: `1.1.1`
-- Recommended CyberDeck server/launcher version: `1.3.1`
+- Mobile app version: `1.1.2`
+- Recommended CyberDeck server/launcher version: `1.3.2`
 - Mobile settings screen now includes a GitHub release check against:
   - `https://api.github.com/repos/Overl1te/CyberDeck/releases/latest`
   - `https://api.github.com/repos/Overl1te/CyberDeck-Mobile/releases/latest`
