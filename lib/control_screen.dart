@@ -155,7 +155,7 @@ class _ControlScreenState extends State<ControlScreen> {
     effectiveFps: 0,
   );
   late _AdaptiveStreamParams _adaptiveParams;
-  static const int _adaptiveRestartCooldownFloorMs = 12000;
+  static const int _adaptiveRestartCooldownFloorMs = 30000;
   static const int _recoveredStableWindowFloorMs = 20000;
   int _lastAdaptiveResolveAtMs = 0;
 
@@ -172,6 +172,7 @@ class _ControlScreenState extends State<ControlScreen> {
   static const int _readyTransientFailureWindowMs = 6000;
   static const int _readyTransientRestartCooldownMs = 1800;
   static const int _readyTransientFailureEscalateCount = 2;
+  static const int _readyTransientFailureEscalateCountTs = 3;
   final Map<String, int> _candidateFailureCount = <String, int>{};
   String _lastReadyCandidateSignature = '';
 
@@ -921,9 +922,9 @@ class _ControlScreenState extends State<ControlScreen> {
     final retry = max(0, retryAttempt);
 
     if (candidate.transport == _StreamTransport.mpegTs) {
-      const baseMs = 3400;
-      final withRetry = baseMs + (retry * 1200);
-      return max(policyMs, min(withRetry, 9800));
+      const baseMs = 6200;
+      final withRetry = baseMs + (retry * 1600);
+      return max(policyMs, min(withRetry, 12000));
     }
 
     final baseMs = 2400 + (retry * 700);
@@ -948,7 +949,12 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 
   Uri _audioRelayUri() {
-    return _apiClient.uri('/audio_stream');
+    return _apiClient.uri(
+      '/audio_stream',
+      queryParameters: <String, String>{
+        'token': widget.token,
+      },
+    );
   }
 
   Uri _resolveCandidateUri(String raw) {
@@ -1114,7 +1120,7 @@ class _ControlScreenState extends State<ControlScreen> {
           payload,
           resolveCandidateUri: _resolveCandidateUri,
           token: widget.token,
-          includeAuthQueryToken: false,
+          includeAuthQueryToken: true,
           maxWidth: _adaptiveParams.maxWidth,
           quality: _adaptiveParams.quality,
           fps: _adaptiveParams.fps,
@@ -1338,33 +1344,24 @@ class _ControlScreenState extends State<ControlScreen> {
             _candidateReadyAtMs <= 0 ? -1 : nowMs - _candidateReadyAtMs;
         _log(
             'ignore transient failure on ready candidate age=${ageMs}ms: $reason');
-        if (candidate?.transport == _StreamTransport.mpegTs) {
-          final restartAgo = _lastReadyTransientRestartAtMs <= 0
-              ? 1 << 30
-              : nowMs - _lastReadyTransientRestartAtMs;
-          if (restartAgo >= _readyTransientRestartCooldownMs) {
-            _lastReadyTransientRestartAtMs = nowMs;
-            _restartCurrentCandidate('recovering stream...');
-            return;
-          }
-        } else {
-          final inWindow = _lastReadyTransientFailureAtMs > 0 &&
-              (nowMs - _lastReadyTransientFailureAtMs) <=
-                  _readyTransientFailureWindowMs;
-          _readyTransientFailureCount =
-              inWindow ? (_readyTransientFailureCount + 1) : 1;
-          _lastReadyTransientFailureAtMs = nowMs;
-          final restartAgo = _lastReadyTransientRestartAtMs <= 0
-              ? 1 << 30
-              : nowMs - _lastReadyTransientRestartAtMs;
-          if (_readyTransientFailureCount >=
-                  _readyTransientFailureEscalateCount &&
-              restartAgo >= _readyTransientRestartCooldownMs) {
-            _readyTransientFailureCount = 0;
-            _lastReadyTransientRestartAtMs = nowMs;
-            _restartCurrentCandidate('recovering stream...');
-            return;
-          }
+        final inWindow = _lastReadyTransientFailureAtMs > 0 &&
+            (nowMs - _lastReadyTransientFailureAtMs) <=
+                _readyTransientFailureWindowMs;
+        _readyTransientFailureCount =
+            inWindow ? (_readyTransientFailureCount + 1) : 1;
+        _lastReadyTransientFailureAtMs = nowMs;
+        final restartAgo = _lastReadyTransientRestartAtMs <= 0
+            ? 1 << 30
+            : nowMs - _lastReadyTransientRestartAtMs;
+        final escalateCount = candidate?.transport == _StreamTransport.mpegTs
+            ? _readyTransientFailureEscalateCountTs
+            : _readyTransientFailureEscalateCount;
+        if (_readyTransientFailureCount >= escalateCount &&
+            restartAgo >= _readyTransientRestartCooldownMs) {
+          _readyTransientFailureCount = 0;
+          _lastReadyTransientRestartAtMs = nowMs;
+          _restartCurrentCandidate('recovering stream...');
+          return;
         }
         if (mounted && _streamStatus.isEmpty) {
           setState(() => _streamStatus = 'stream hiccup, waiting recovery...');
@@ -1478,7 +1475,6 @@ class _ControlScreenState extends State<ControlScreen> {
         );
         return;
       }
-
       var next = _adaptiveParams.copyWith(maxWidth: decision.newWidth);
       if (_adaptiveHint.preferQualityBeforeResize) {
         final qualityFirst = _nextParamsByQualityFirst(decision);
@@ -1527,27 +1523,39 @@ class _ControlScreenState extends State<ControlScreen> {
     final isDowngrade = decision.reason == AdaptiveSwitchReason.fpsDrop ||
         decision.reason == AdaptiveSwitchReason.rttHigh;
     if (isDowngrade) {
-      final nextQuality = max(
-        _adaptiveHint.minQuality,
-        _adaptiveParams.quality - _adaptiveHint.downStepQuality,
-      );
-      final nextFps = max(
-        _adaptiveHint.minFps,
-        _adaptiveParams.fps - _adaptiveHint.downStepFps,
-      );
-      return _adaptiveParams.copyWith(quality: nextQuality, fps: nextFps);
+      if (_adaptiveParams.quality > _adaptiveHint.minQuality) {
+        final nextQuality = max(
+          _adaptiveHint.minQuality,
+          _adaptiveParams.quality - _adaptiveHint.downStepQuality,
+        );
+        return _adaptiveParams.copyWith(quality: nextQuality);
+      }
+      if (_adaptiveParams.fps > _adaptiveHint.minFps) {
+        final nextFps = max(
+          _adaptiveHint.minFps,
+          _adaptiveParams.fps - _adaptiveHint.downStepFps,
+        );
+        return _adaptiveParams.copyWith(fps: nextFps);
+      }
+      return _adaptiveParams;
     }
 
     if (decision.reason == AdaptiveSwitchReason.recovered) {
-      final nextQuality = min(
-        _adaptiveHint.maxQuality,
-        _adaptiveParams.quality + _adaptiveHint.upStepQuality,
-      );
-      final nextFps = min(
-        _adaptiveHint.maxFps,
-        _adaptiveParams.fps + _adaptiveHint.upStepFps,
-      );
-      return _adaptiveParams.copyWith(quality: nextQuality, fps: nextFps);
+      if (_adaptiveParams.fps < _adaptiveHint.maxFps) {
+        final nextFps = min(
+          _adaptiveHint.maxFps,
+          _adaptiveParams.fps + _adaptiveHint.upStepFps,
+        );
+        return _adaptiveParams.copyWith(fps: nextFps);
+      }
+      if (_adaptiveParams.quality < _adaptiveHint.maxQuality) {
+        final nextQuality = min(
+          _adaptiveHint.maxQuality,
+          _adaptiveParams.quality + _adaptiveHint.upStepQuality,
+        );
+        return _adaptiveParams.copyWith(quality: nextQuality);
+      }
+      return _adaptiveParams;
     }
     return _adaptiveParams;
   }
@@ -1616,9 +1624,9 @@ class _ControlScreenState extends State<ControlScreen> {
     final dpr = mq.devicePixelRatio <= 0 ? 1.0 : mq.devicePixelRatio;
     final screenPx = (longestSide * dpr).round();
     final decodeCap = _lastDecodeMs >= 28
-        ? 900
-        : (_lastDecodeMs >= 22 || _streamRenderFps < 24 ? 1024 : 1280);
-    final targetPx = min(decodeCap, max(800, screenPx));
+        ? 1280
+        : (_lastDecodeMs >= 22 || _streamRenderFps < 24 ? 1440 : 1920);
+    final targetPx = min(decodeCap, max(960, screenPx));
     return max(640, min(_adaptiveParams.maxWidth, targetPx));
   }
 
@@ -1798,7 +1806,8 @@ class _ControlScreenState extends State<ControlScreen> {
         'Authorization': 'Bearer ${widget.token}',
       },
       enabled: true,
-      startupTimeout: const Duration(seconds: 12),
+      enableReadinessProbe: false,
+      startupTimeout: const Duration(seconds: 16),
       onReady: () {
         if (!mounted || _audioRelayStatus.isEmpty) return;
         _log('audio relay ready');

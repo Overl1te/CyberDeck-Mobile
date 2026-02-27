@@ -46,6 +46,9 @@ class AppLocalizationsEn extends AppLocalizations {
       'Active VPN may block local network connection to CyberDeck. Disable VPN or allow local LAN access.';
 
   @override
+  String get vpnWarningIgnoreAction => 'IGNORE VPN';
+
+  @override
   String get enterIpAndCode => 'Enter IP and pairing code';
 
   @override

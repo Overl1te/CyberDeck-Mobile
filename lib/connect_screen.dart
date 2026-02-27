@@ -216,27 +216,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         clientId: await _getOrCreateClientId(),
         deviceName: 'Mobile (${Platform.operatingSystem})',
       );
-
-      final hostPort = _formatHostPort(result.host, result.port);
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('saved_ip', hostPort);
-      await DeviceStorage.saveDevice(
-        SavedDevice(
-          id: _deviceId(
-            scheme: result.scheme,
-            host: result.host,
-            port: result.port,
-          ),
-          name: result.serverName,
-          ip: result.host,
-          port: result.port,
-          scheme: result.scheme,
-          token: result.token,
-        ),
-      );
-
-      if (!mounted) return;
-      _closeOrGoHome();
+      await _finalizePairing(result);
     } catch (e) {
       final canFallback =
           fallbackCode != null && fallbackCode.trim().isNotEmpty;
@@ -305,27 +285,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         deviceName: 'Mobile (${Platform.operatingSystem})',
         scheme: scheme,
       );
-
-      final hostPort = _formatHostPort(result.host, result.port);
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('saved_ip', hostPort);
-      await DeviceStorage.saveDevice(
-        SavedDevice(
-          id: _deviceId(
-            scheme: result.scheme,
-            host: result.host,
-            port: result.port,
-          ),
-          name: result.serverName,
-          ip: result.host,
-          port: result.port,
-          scheme: result.scheme,
-          token: result.token,
-        ),
-      );
-
-      if (!mounted) return;
-      _closeOrGoHome();
+      await _finalizePairing(result);
     } catch (e) {
       if (PairingService.isApprovalPendingError(e)) {
         _showError(_l10n.approvalPendingOnDesktop);
@@ -334,6 +294,56 @@ class _ConnectScreenState extends State<ConnectScreen> {
       _showError(_l10n.connectionError(e.toString()));
     } finally {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _finalizePairing(PairingResult result) async {
+    final hostPort = _formatHostPort(result.host, result.port);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('saved_ip', hostPort);
+    await DeviceStorage.saveDevice(
+      SavedDevice(
+        id: _deviceId(
+          scheme: result.scheme,
+          host: result.host,
+          port: result.port,
+        ),
+        name: result.serverName,
+        ip: result.host,
+        port: result.port,
+        scheme: result.scheme,
+        token: result.token,
+      ),
+    );
+
+    if (!mounted) return;
+    if (!result.approved) {
+      _showError(_l10n.approvalPendingOnDesktop);
+      await _waitForDesktopApproval(result);
+      if (!mounted) return;
+    }
+    _closeOrGoHome();
+  }
+
+  Future<void> _waitForDesktopApproval(PairingResult result) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 30));
+    while (DateTime.now().isBefore(deadline)) {
+      if (!mounted) return;
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      bool? approved;
+      try {
+        approved = await _pairingService.getPairingApprovalStatus(
+          host: result.host,
+          port: result.port,
+          scheme: result.scheme,
+          token: result.token,
+        );
+      } catch (_) {
+        approved = null;
+      }
+      if (approved == true || approved == null) {
+        return;
+      }
     }
   }
 

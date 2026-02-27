@@ -170,6 +170,12 @@ abstract class AppLocalizations {
   /// **'Active VPN may block local network connection to CyberDeck. Disable VPN or allow local LAN access.'**
   String get vpnWarningBody;
 
+  /// No description provided for @vpnWarningIgnoreAction.
+  ///
+  /// In en, this message translates to:
+  /// **'IGNORE VPN'**
+  String get vpnWarningIgnoreAction;
+
   /// No description provided for @enterIpAndCode.
   ///
   /// In en, this message translates to:

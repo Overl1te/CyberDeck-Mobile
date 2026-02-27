@@ -47,6 +47,9 @@ class AppLocalizationsRu extends AppLocalizations {
       'Активный VPN может блокировать подключение к CyberDeck по локальной сети. Отключите VPN или разрешите доступ к локальной сети (LAN).';
 
   @override
+  String get vpnWarningIgnoreAction => 'ИГНОРИРОВАТЬ VPN';
+
+  @override
   String get enterIpAndCode => 'Введите IP и код пары';
 
   @override

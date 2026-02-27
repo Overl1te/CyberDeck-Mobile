@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'connect_screen.dart';
 import 'dashboard_screen.dart';
@@ -19,6 +20,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   List<SavedDevice> _devices = [];
   bool _vpnWarningShown = false;
+  static const String _vpnWarningIgnoredKey = 'vpn_warning_ignored';
 
   AppLocalizations get _l10n => AppLocalizations.of(context)!;
 
@@ -38,6 +40,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _checkAndShowVpnWarning() async {
     if (_vpnWarningShown) return;
+    if (await _isVpnWarningIgnored()) return;
     final active = await _isVpnLikelyActive();
     if (!mounted || !active) return;
     _vpnWarningShown = true;
@@ -59,8 +62,25 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
+        action: SnackBarAction(
+          label: _l10n.vpnWarningIgnoreAction,
+          textColor: const Color(0xFFFFD54F),
+          onPressed: () {
+            _setVpnWarningIgnored(true);
+          },
+        ),
       ),
     );
+  }
+
+  Future<bool> _isVpnWarningIgnored() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_vpnWarningIgnoredKey) ?? false;
+  }
+
+  Future<void> _setVpnWarningIgnored(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_vpnWarningIgnoredKey, value);
   }
 
   Future<bool> _isVpnLikelyActive() async {

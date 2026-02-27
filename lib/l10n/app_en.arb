@@ -12,6 +12,7 @@
   "discoveredDevices": "Discovered devices:",
   "vpnWarningTitle": "VPN warning",
   "vpnWarningBody": "Active VPN may block local network connection to CyberDeck. Disable VPN or allow local LAN access.",
+  "vpnWarningIgnoreAction": "IGNORE VPN",
   "enterIpAndCode": "Enter IP and pairing code",
   "connectionError": "Connection error: {error}",
   "@connectionError": {

@@ -9,6 +9,7 @@ class PairingResult {
   final String scheme;
   final String token;
   final String serverName;
+  final bool approved;
   final int? protocolVersion;
   final Set<String> features;
 
@@ -18,6 +19,7 @@ class PairingResult {
     this.scheme = 'http',
     required this.token,
     required this.serverName,
+    this.approved = true,
     this.protocolVersion,
     this.features = const <String>{},
   });
@@ -67,13 +69,13 @@ class PairingService {
         authorized: false,
       );
       final payload = _decodeJsonObject(response.body);
-      if (_isApprovalPending(payload, response.statusCode)) {
-        throw const ApiException('approval_pending');
-      }
       if (response.statusCode == 501) {
         throw const ApiException('QR login is not supported by the server');
       }
       if (response.statusCode != 200) {
+        if (_isApprovalPending(payload, response.statusCode)) {
+          throw const ApiException('approval_pending');
+        }
         final details = _extractErrorDetails(payload);
         throw ApiException(
           details ?? 'QR login failed',
@@ -88,6 +90,9 @@ class PairingService {
       }
       final token = payload['token']?.toString().trim();
       if (token == null || token.isEmpty) {
+        if (_isApprovalPending(payload, response.statusCode)) {
+          throw const ApiException('approval_pending');
+        }
         throw const ApiException('Invalid response: missing token');
       }
       return PairingResult(
@@ -96,6 +101,7 @@ class PairingService {
         scheme: normalizedScheme,
         token: token,
         serverName: payload['server_name']?.toString() ?? 'Unknown PC',
+        approved: _isApproved(payload),
         protocolVersion: _toInt(payload['protocol_version']),
         features: _parseFeatures(payload['features']),
       );
@@ -140,11 +146,11 @@ class PairingService {
         } catch (_) {
           payload = null;
         }
-        if (_isApprovalPending(payload, response.statusCode)) {
-          lastError = const ApiException('approval_pending');
-          break;
-        }
         if (response.statusCode != 200) {
+          if (_isApprovalPending(payload, response.statusCode)) {
+            lastError = const ApiException('approval_pending');
+            break;
+          }
           lastError =
               ApiException('Handshake failed', statusCode: response.statusCode);
           continue;
@@ -164,6 +170,7 @@ class PairingService {
           scheme: normalizedScheme,
           token: token,
           serverName: payload['server_name']?.toString() ?? 'Unknown PC',
+          approved: _isApproved(payload),
           protocolVersion: _toInt(payload['protocol_version']),
           features: _parseFeatures(payload['features']),
         );
@@ -176,6 +183,54 @@ class PairingService {
 
     throw lastError ??
         const ApiException('Could not connect. Check code, host and port.');
+  }
+
+  Future<bool?> getPairingApprovalStatus({
+    required String host,
+    required int port,
+    String scheme = 'http',
+    required String token,
+  }) async {
+    final normalizedScheme = _normalizeScheme(scheme);
+    final normalizedToken = token.trim();
+    if (normalizedToken.isEmpty) {
+      throw const ApiException('token_required');
+    }
+
+    final api = ApiClient(
+      host: host,
+      port: port,
+      scheme: normalizedScheme,
+      maxRetries: 1,
+    );
+    try {
+      final response = await api.get(
+        '/api/pairing_status',
+        queryParameters: <String, String>{'token': normalizedToken},
+        authorized: false,
+        timeout: const Duration(seconds: 3),
+      );
+      if (response.statusCode == 404) {
+        return null;
+      }
+      final payload = _decodeJsonObject(response.body);
+      if (response.statusCode != 200) {
+        final details = _extractErrorDetails(payload);
+        throw ApiException(
+          details ?? 'Pairing status failed',
+          statusCode: response.statusCode,
+        );
+      }
+      if (payload == null) {
+        throw ApiException(
+          'Invalid JSON in response',
+          statusCode: response.statusCode,
+        );
+      }
+      return _isApproved(payload);
+    } finally {
+      api.close();
+    }
   }
 
   int? _toInt(dynamic value) {
@@ -238,6 +293,16 @@ class PairingService {
     }
 
     return statusCode == 202;
+  }
+
+  bool _isApproved(Map<String, dynamic> payload) {
+    final approved = _toBool(payload['approved']);
+    if (approved != null) return approved;
+    final pending = _toBool(payload['approval_pending']);
+    if (pending != null) return !pending;
+    final status = payload['status']?.toString().trim().toLowerCase();
+    if (status == 'approval_pending') return false;
+    return true;
   }
 
   bool? _toBool(dynamic value) {

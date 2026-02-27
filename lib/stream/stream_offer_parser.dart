@@ -1,3 +1,5 @@
+import 'dart:math';
+
 class ParsedStreamCandidate {
   final Uri uri;
   final String mime;
@@ -133,14 +135,19 @@ class StreamAdaptiveHint {
     required int baseMaxWidth,
     required int baseQuality,
   }) {
+    final minFpsFloor =
+        ((baseFps * 0.5).round()).clamp(20, max(20, min(45, baseFps))).toInt();
+    final minWidthFloor =
+        baseMaxWidth >= 1152 ? 1152 : (baseMaxWidth >= 960 ? 960 : 640);
+    final minQualityFloor = max(35, min(baseQuality, 45));
     return StreamAdaptiveHint(
-      minFps: 10,
-      minMaxWidth: 640,
-      minQuality: 25,
+      minFps: minFpsFloor,
+      minMaxWidth: minWidthFloor,
+      minQuality: minQualityFloor,
       maxFps: baseFps,
       maxMaxWidth: baseMaxWidth,
       maxQuality: baseQuality,
-      downStepFps: 5,
+      downStepFps: 3,
       downStepMaxWidth: 160,
       downStepQuality: 8,
       upStepFps: 3,
@@ -153,13 +160,13 @@ class StreamAdaptiveHint {
       stableWindowSeconds: 8,
       widthLadder: _normalizedWidthLadder(
         defaultWidthLadder,
-        minWidthFloor: 640,
+        minWidthFloor: minWidthFloor,
         maxWidthCeiling: baseMaxWidth,
       ),
-      minSwitchIntervalMs: 6500,
+      minSwitchIntervalMs: 10000,
       hysteresisRatio: 0.12,
-      minWidthFloor: 640,
-      downgradeSustainMs: 3000,
+      minWidthFloor: minWidthFloor,
+      downgradeSustainMs: 4500,
       upgradeSustainMs: 8000,
       preferQualityBeforeResize: false,
     );

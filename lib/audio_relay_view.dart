@@ -1,12 +1,15 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 
 class AudioRelayView extends StatefulWidget {
   final String streamUrl;
   final Map<String, String> headers;
   final bool enabled;
+  final bool enableReadinessProbe;
   final Duration startupTimeout;
   final VoidCallback? onReady;
   final ValueChanged<String>? onFailure;
@@ -16,6 +19,7 @@ class AudioRelayView extends StatefulWidget {
     required this.streamUrl,
     this.headers = const <String, String>{},
     this.enabled = true,
+    this.enableReadinessProbe = false,
     this.startupTimeout = const Duration(seconds: 4),
     this.onReady,
     this.onFailure,
@@ -31,6 +35,7 @@ class _AudioRelayViewState extends State<AudioRelayView> {
   bool _ready = false;
   bool _failureReported = false;
   String _lastUrl = '';
+  int _controllerEpoch = 0;
 
   @override
   void initState() {
@@ -75,6 +80,7 @@ class _AudioRelayViewState extends State<AudioRelayView> {
   }
 
   Future<void> _replaceController(String? url) async {
+    final epoch = ++_controllerEpoch;
     _startupTimer?.cancel();
 
     final previous = _controller;
@@ -95,14 +101,19 @@ class _AudioRelayViewState extends State<AudioRelayView> {
     if (!mounted || url == null || url.isEmpty) {
       return;
     }
+    if (epoch != _controllerEpoch) return;
 
     final controller = _createController(url);
     _controller = controller;
     _lastUrl = url;
     controller.addListener(_onControllerChanged);
     _armStartupTimeout();
+    if (widget.enableReadinessProbe) {
+      unawaited(_probeStreamReadiness(url, epoch: epoch));
+    }
 
     Future<void>(() async {
+      if (epoch != _controllerEpoch) return;
       try {
         await controller.setVolume(100);
       } catch (_) {
@@ -121,6 +132,8 @@ class _AudioRelayViewState extends State<AudioRelayView> {
       '--network-caching=$networkCacheMs',
       '--live-caching=$liveCacheMs',
       '--demux=ts',
+      '--no-video-title-show',
+      '--no-video',
     ];
     if (auth.isNotEmpty) {
       extras.add('--http-header=Authorization: $auth');
@@ -149,6 +162,42 @@ class _AudioRelayViewState extends State<AudioRelayView> {
         extras: extras,
       ),
     );
+  }
+
+  Future<void> _probeStreamReadiness(String url, {required int epoch}) async {
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', Uri.parse(url));
+      widget.headers.forEach((key, value) {
+        final k = key.trim();
+        final v = value.trim();
+        if (k.isEmpty || v.isEmpty) return;
+        request.headers[k] = v;
+      });
+      final response =
+          await client.send(request).timeout(widget.startupTimeout);
+      if (epoch != _controllerEpoch || !mounted) return;
+      final status = response.statusCode;
+      if (status < 200 || status >= 300) {
+        _notifyFailure('http $status');
+        return;
+      }
+      await response.stream.first.timeout(
+        Duration(
+          milliseconds: max(800, widget.startupTimeout.inMilliseconds ~/ 2),
+        ),
+      );
+      if (epoch != _controllerEpoch || !mounted) return;
+      _markReady();
+    } on TimeoutException {
+      if (epoch != _controllerEpoch || !mounted) return;
+      _notifyFailure('timeout');
+    } catch (e) {
+      if (epoch != _controllerEpoch || !mounted) return;
+      _notifyFailure('connect failed: $e');
+    } finally {
+      client.close();
+    }
   }
 
   void _armStartupTimeout() {
@@ -186,6 +235,7 @@ class _AudioRelayViewState extends State<AudioRelayView> {
     }
     if (!_ready &&
         (value.isPlaying ||
+            value.isInitialized ||
             value.position.inMilliseconds > 0 ||
             value.duration.inMilliseconds > 0)) {
       _markReady();

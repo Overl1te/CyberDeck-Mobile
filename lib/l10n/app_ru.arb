@@ -12,6 +12,7 @@
   "discoveredDevices": "Найденные устройства:",
   "vpnWarningTitle": "Предупреждение VPN",
   "vpnWarningBody": "Активный VPN может блокировать подключение к CyberDeck по локальной сети. Отключите VPN или разрешите доступ к локальной сети (LAN).",
+  "vpnWarningIgnoreAction": "ИГНОРИРОВАТЬ VPN",
   "enterIpAndCode": "Введите IP и код пары",
   "connectionError": "Ошибка подключения: {error}",
   "@connectionError": {

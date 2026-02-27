@@ -37,6 +37,13 @@ CyberdeckQrData? parseCyberdeckQrPayload(String raw) {
   final uri = Uri.tryParse(s);
   if (uri != null && uri.hasScheme) {
     final scheme = uri.scheme.toLowerCase();
+    if (scheme == 'intent') {
+      final normalized = _normalizeAndroidIntentUri(uri);
+      if (normalized != null) {
+        final data = _parseCyberdeckQrUri(normalized);
+        if (data != null) return data;
+      }
+    }
     if (scheme.startsWith('cyberdeck') ||
         scheme == 'http' ||
         scheme == 'https') {
@@ -62,6 +69,44 @@ CyberdeckQrData? parseCyberdeckQrPayload(String raw) {
   }
 
   return null;
+}
+
+Uri? _normalizeAndroidIntentUri(Uri intentUri) {
+  final fragment = intentUri.fragment;
+  if (fragment.isEmpty) return null;
+  final parts = fragment.split(';');
+  if (parts.isEmpty) return null;
+  if (parts.first.trim() != 'Intent') return null;
+
+  String targetScheme = '';
+  for (final entry in parts.skip(1)) {
+    final sep = entry.indexOf('=');
+    if (sep <= 0) continue;
+    final key = entry.substring(0, sep).trim().toLowerCase();
+    final value = entry.substring(sep + 1).trim();
+    if (key == 'scheme') {
+      targetScheme = value.toLowerCase();
+      break;
+    }
+  }
+  if (!targetScheme.startsWith('cyberdeck')) return null;
+
+  var host = intentUri.host.trim();
+  var path = intentUri.path;
+  if (host.isEmpty && intentUri.pathSegments.isNotEmpty) {
+    host = intentUri.pathSegments.first.trim();
+    if (intentUri.pathSegments.length > 1) {
+      path = '/${intentUri.pathSegments.skip(1).join('/')}';
+    } else {
+      path = '';
+    }
+  }
+  return Uri(
+    scheme: targetScheme,
+    host: host,
+    path: path,
+    query: intentUri.query,
+  );
 }
 
 CyberdeckQrData? _parseCyberdeckQrUri(Uri uri) {
