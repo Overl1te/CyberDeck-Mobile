@@ -6,8 +6,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'device_storage.dart';
+import 'errors/error_help_screen.dart';
 import 'home_screen.dart';
 import 'l10n/app_localizations.dart';
+import 'network/api_client.dart';
 import 'network/host_port.dart';
 import 'qr_payload_parser.dart';
 import 'qr_scan_screen.dart';
@@ -149,6 +151,17 @@ class _ConnectScreenState extends State<ConnectScreen> {
     }
   }
 
+  Future<void> _openErrorGuide({String initialQuery = ''}) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ErrorHelpScreen(
+          initialQuery: initialQuery,
+        ),
+      ),
+    );
+  }
+
   Future<void> _processInitialQrIfNeeded() async {
     if (_initialQrHandled) return;
     final raw = widget.initialQrRaw?.trim();
@@ -221,7 +234,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
       final canFallback =
           fallbackCode != null && fallbackCode.trim().isNotEmpty;
       if (canFallback && PairingService.isQrLoginFallbackError(e)) {
-        _showError(_l10n.qrFallbackToHandshake);
+        _showError(
+          _l10n.qrFallbackToHandshake,
+          code: _errorCode(e),
+        );
         await _connect(
           manualIp: _formatHostPort(host, port),
           manualCode: fallbackCode,
@@ -230,18 +246,18 @@ class _ConnectScreenState extends State<ConnectScreen> {
         return;
       }
       if (PairingService.isInvalidQrTokenError(e)) {
-        _showError(_l10n.qrTokenInvalidOrExpired);
+        _showError(_l10n.qrTokenInvalidOrExpired, code: _errorCode(e));
         return;
       }
       if (PairingService.isApprovalPendingError(e)) {
-        _showError(_l10n.approvalPendingOnDesktop);
+        _showError(_l10n.approvalPendingOnDesktop, code: _errorCode(e));
         return;
       }
       if (PairingService.isInsecureTlsError(e)) {
         _showError(_l10n.tlsInsecureWarning);
         return;
       }
-      _showError(_l10n.connectionError(e.toString()));
+      _showError(_l10n.connectionError(_errorMessage(e)), code: _errorCode(e));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -288,10 +304,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
       await _finalizePairing(result);
     } catch (e) {
       if (PairingService.isApprovalPendingError(e)) {
-        _showError(_l10n.approvalPendingOnDesktop);
+        _showError(_l10n.approvalPendingOnDesktop, code: _errorCode(e));
         return;
       }
-      _showError(_l10n.connectionError(e.toString()));
+      _showError(_l10n.connectionError(_errorMessage(e)), code: _errorCode(e));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -358,13 +374,35 @@ class _ConnectScreenState extends State<ConnectScreen> {
     );
   }
 
-  void _showError(String message) {
+  String? _errorCode(Object error) {
+    if (error is ApiException && error.hasCatalogCode) {
+      return error.code.trim();
+    }
+    return null;
+  }
+
+  String _errorMessage(Object error) {
+    if (error is ApiException) {
+      return error.message;
+    }
+    return error.toString();
+  }
+
+  void _showError(String message, {String? code}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(message),
+        content: Text(
+          (code == null || code.trim().isEmpty) ? message : '[$code] $message',
+        ),
         backgroundColor: kErrorColor,
         duration: const Duration(seconds: 4),
+        action: (code == null || code.trim().isEmpty)
+            ? null
+            : SnackBarAction(
+                label: 'HELP',
+                onPressed: () => _openErrorGuide(initialQuery: code),
+              ),
       ),
     );
   }
@@ -476,6 +514,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
                         )
                       : const Icon(Icons.radar),
                   label: Text(_isScanning ? l10n.scanning : l10n.scanNetwork),
+                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                ),
+                const SizedBox(height: 6),
+                TextButton.icon(
+                  onPressed: _openErrorGuide,
+                  icon: const Icon(Icons.find_in_page),
+                  label: const Text('ERROR GUIDE'),
                   style: TextButton.styleFrom(foregroundColor: Colors.white),
                 ),
                 if (_foundDevices.isNotEmpty) ...<Widget>[

@@ -9,6 +9,7 @@ import 'control/controllers/control_connection_controller.dart';
 import 'control_screen.dart';
 import 'device_settings_screen.dart';
 import 'device_storage.dart';
+import 'errors/error_help_screen.dart';
 import 'file_transfer.dart';
 import 'help_screen.dart';
 import 'l10n/app_localizations.dart';
@@ -228,6 +229,57 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await navigator.push(MaterialPageRoute(builder: (_) => const HelpScreen()));
   }
 
+  Future<void> _openErrorGuide({String initialQuery = ''}) async {
+    final navigator = Navigator.of(context);
+    await navigator.push(
+      MaterialPageRoute(
+        builder: (_) => ErrorHelpScreen(
+          initialQuery: initialQuery,
+          host: widget.device.ip,
+          port: widget.device.port,
+          scheme: widget.device.scheme,
+        ),
+      ),
+    );
+  }
+
+  String? _errorCode(Object error) {
+    if (error is ApiException && error.hasCatalogCode) {
+      return error.code.trim();
+    }
+    if (error is TransferException && error.hasCatalogCode) {
+      return error.code.trim();
+    }
+    return null;
+  }
+
+  String _errorMessage(Object error) {
+    if (error is ApiException) return error.message;
+    if (error is TransferException) return error.message;
+    return error.toString();
+  }
+
+  void _showErrorSnack(
+    ScaffoldMessengerState messenger,
+    String message, {
+    String? code,
+  }) {
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          (code == null || code.trim().isEmpty) ? message : '[$code] $message',
+        ),
+        backgroundColor: kErrorColor,
+        action: (code == null || code.trim().isEmpty)
+            ? null
+            : SnackBarAction(
+                label: 'HELP',
+                onPressed: () => _openErrorGuide(initialQuery: code),
+              ),
+      ),
+    );
+  }
+
   void _showProgressDialog({
     required ValueNotifier<double> progress,
     required String title,
@@ -323,14 +375,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } catch (e) {
       if (!mounted || canceled) return;
       if (e is DioException && CancelToken.isCancel(e)) return;
-      final message = e.toString().contains('upload_checksum_mismatch')
+      final code = _errorCode(e);
+      final raw = _errorMessage(e);
+      final message = raw.contains('upload_checksum_mismatch')
           ? _l10n.uploadChecksumMismatch
-          : e.toString();
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(_l10n.uploadError(message)),
-          backgroundColor: kErrorColor,
-        ),
+          : raw;
+      _showErrorSnack(
+        messenger,
+        _l10n.uploadError(message),
+        code: code,
       );
     } finally {
       progress.dispose();
@@ -368,6 +421,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               icon: const Icon(Icons.tune), onPressed: _openDeviceSettings),
           IconButton(
               icon: const Icon(Icons.help_outline), onPressed: _openHelp),
+          IconButton(
+              icon: const Icon(Icons.find_in_page), onPressed: _openErrorGuide),
         ],
       ),
       body: CyberBackground(

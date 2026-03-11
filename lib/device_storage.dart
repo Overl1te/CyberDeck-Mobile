@@ -119,6 +119,7 @@ class DeviceSettings {
   final bool lowLatency;
   final bool streamAudio;
   final String controlMode;
+  final String networkProfile;
 
   const DeviceSettings({
     required this.alias,
@@ -135,6 +136,7 @@ class DeviceSettings {
     required this.lowLatency,
     required this.streamAudio,
     required this.controlMode,
+    required this.networkProfile,
   });
 
   factory DeviceSettings.defaults() => const DeviceSettings(
@@ -152,6 +154,7 @@ class DeviceSettings {
         lowLatency: false,
         streamAudio: true,
         controlMode: 'touchpad',
+        networkProfile: 'stable_wifi',
       );
 
   DeviceSettings copyWith({
@@ -169,6 +172,7 @@ class DeviceSettings {
     bool? lowLatency,
     bool? streamAudio,
     String? controlMode,
+    String? networkProfile,
   }) {
     return DeviceSettings(
       alias: alias ?? this.alias,
@@ -185,6 +189,8 @@ class DeviceSettings {
       lowLatency: lowLatency ?? this.lowLatency,
       streamAudio: streamAudio ?? this.streamAudio,
       controlMode: _normalizeControlMode(controlMode ?? this.controlMode),
+      networkProfile:
+          _normalizeNetworkProfile(networkProfile ?? this.networkProfile),
     );
   }
 
@@ -203,6 +209,7 @@ class DeviceSettings {
         'lowLatency': lowLatency,
         'streamAudio': streamAudio,
         'controlMode': controlMode,
+        'networkProfile': networkProfile,
       };
 
   factory DeviceSettings.fromJson(Map<String, dynamic> json) => DeviceSettings(
@@ -220,12 +227,27 @@ class DeviceSettings {
         lowLatency: json['lowLatency'] as bool? ?? false,
         streamAudio: json['streamAudio'] as bool? ?? true,
         controlMode: _normalizeControlMode(json['controlMode']?.toString()),
+        networkProfile:
+            _normalizeNetworkProfile(json['networkProfile']?.toString()),
       );
 
   static String _normalizeControlMode(String? raw) {
     final value = (raw ?? '').trim().toLowerCase();
     if (value == 'tablet') return 'tablet';
     return 'touchpad';
+  }
+
+  static String _normalizeNetworkProfile(String? raw) {
+    final value = (raw ?? '').trim().toLowerCase();
+    switch (value) {
+      case 'mobile_hotspot':
+      case 'low_latency':
+      case 'battery_safe':
+      case 'stable_wifi':
+        return value;
+      default:
+        return 'stable_wifi';
+    }
   }
 }
 

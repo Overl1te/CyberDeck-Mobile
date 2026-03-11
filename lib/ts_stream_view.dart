@@ -9,6 +9,9 @@ class TsStreamView extends StatefulWidget {
   final Duration startupTimeout;
   final bool lowLatency;
   final ValueChanged<Size>? onVideoSize;
+  final VoidCallback? onPlaybackActivity;
+  final VoidCallback? onAudioReady;
+  final ValueChanged<String>? onAudioUnavailable;
   final VoidCallback? onReady;
   final ValueChanged<String>? onStreamFailure;
   final Widget? loadingBuilder;
@@ -21,6 +24,9 @@ class TsStreamView extends StatefulWidget {
     this.startupTimeout = const Duration(seconds: 4),
     this.lowLatency = false,
     this.onVideoSize,
+    this.onPlaybackActivity,
+    this.onAudioReady,
+    this.onAudioUnavailable,
     this.onReady,
     this.onStreamFailure,
     this.loadingBuilder,
@@ -42,6 +48,10 @@ class _TsStreamViewState extends State<TsStreamView> {
   int _audioPrimeAttempts = 0;
   Size _lastSize = Size.zero;
   String? _lastError;
+  int _lastPlaybackPositionMs = -1;
+  int _lastPlaybackSignalAtMs = 0;
+  bool _audioReadyReported = false;
+  bool _audioUnavailableReported = false;
 
   @override
   void initState() {
@@ -119,6 +129,10 @@ class _TsStreamViewState extends State<TsStreamView> {
     _audioPrimeAttempts = 0;
     _lastError = null;
     _lastSize = Size.zero;
+    _lastPlaybackPositionMs = -1;
+    _lastPlaybackSignalAtMs = 0;
+    _audioReadyReported = false;
+    _audioUnavailableReported = false;
 
     _controller = _createController(url);
     _controller.addListener(_onControllerChanged);
@@ -162,6 +176,7 @@ class _TsStreamViewState extends State<TsStreamView> {
       _audioPrimed = (current ?? -1) >= 0;
       if (_audioPrimed) {
         _audioPrimeTimer?.cancel();
+        _markAudioReady();
       }
       return _audioPrimed;
     } catch (_) {
@@ -186,11 +201,29 @@ class _TsStreamViewState extends State<TsStreamView> {
       _audioPrimeAttempts++;
       Future<void>(() async {
         final ok = await _primeAudioTrack();
-        if (ok || _audioPrimeAttempts >= 20) {
+        if (ok) {
+          timer.cancel();
+          return;
+        }
+        if (_audioPrimeAttempts >= 20) {
+          _markAudioUnavailable('audio track not detected');
           timer.cancel();
         }
       });
     });
+  }
+
+  void _markAudioReady() {
+    if (_audioReadyReported) return;
+    _audioReadyReported = true;
+    _audioUnavailableReported = false;
+    widget.onAudioReady?.call();
+  }
+
+  void _markAudioUnavailable(String reason) {
+    if (_audioUnavailableReported) return;
+    _audioUnavailableReported = true;
+    widget.onAudioUnavailable?.call(reason);
   }
 
   void _armStartupTimeout() {
@@ -240,13 +273,31 @@ class _TsStreamViewState extends State<TsStreamView> {
       widget.onReady?.call();
       setState(() {});
     }
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final positionMs = value.position.inMilliseconds;
+    final positionAdvanced = positionMs > _lastPlaybackPositionMs;
+    if (positionAdvanced) {
+      _lastPlaybackPositionMs = positionMs;
+    }
+    final hasMediaSignal =
+        value.isPlaying || (sz.width > 0 && sz.height > 0) || positionMs > 0;
+    if (hasMediaSignal &&
+        (positionAdvanced || (nowMs - _lastPlaybackSignalAtMs) >= 1000)) {
+      _lastPlaybackSignalAtMs = nowMs;
+      widget.onPlaybackActivity?.call();
+    }
+
     if (!_audioPrimed && value.audioTracksCount > 0) {
       Future<void>(() async {
         final ok = await _primeAudioTrack();
         if (ok) {
           _audioPrimeTimer?.cancel();
+          _markAudioReady();
         }
       });
+    } else if (_audioPrimed) {
+      _markAudioReady();
     }
   }
 

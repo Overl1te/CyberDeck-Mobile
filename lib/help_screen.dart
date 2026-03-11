@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'errors/error_help_screen.dart';
 import 'theme.dart';
 
 class HelpScreen extends StatelessWidget {
@@ -9,12 +10,29 @@ class HelpScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: kBgColor,
-      appBar: AppBar(backgroundColor: kBgColor, title: const Text('\u0421\u043f\u0440\u0430\u0432\u043a\u0430')),
+      appBar: AppBar(
+        backgroundColor: kBgColor,
+        title: const Text('\u0421\u043f\u0440\u0430\u0432\u043a\u0430'),
+        actions: <Widget>[
+          IconButton(
+            icon: const Icon(Icons.find_in_page),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const ErrorHelpScreen(),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: const [
           _HelpCard(
-            title: '\u0421\u043e\u043f\u0440\u044f\u0436\u0435\u043d\u0438\u0435 (pairing)',
+            title:
+                '\u0421\u043e\u043f\u0440\u044f\u0436\u0435\u043d\u0438\u0435 (pairing)',
             bullets: [
               '\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 \u0441\u0435\u0440\u0432\u0435\u0440 \u043d\u0430 \u041f\u041a \u0438 \u043d\u0430\u0439\u0434\u0438\u0442\u0435 \u043a\u043e\u0434 \u0441\u043e\u043f\u0440\u044f\u0436\u0435\u043d\u0438\u044f \u0432 \u043e\u043a\u043d\u0435/\u043a\u043e\u043d\u0441\u043e\u043b\u0438.',
               '\u0423\u0431\u0435\u0434\u0438\u0442\u0435\u0441\u044c, \u0447\u0442\u043e \u0442\u0435\u043b\u0435\u0444\u043e\u043d \u0438 \u041f\u041a \u0432 \u043e\u0434\u043d\u043e\u0439 Wi-Fi/LAN \u0441\u0435\u0442\u0438.',
@@ -22,7 +40,8 @@ class HelpScreen extends StatelessWidget {
             ],
           ),
           _HelpCard(
-            title: '\u041f\u043e\u0438\u0441\u043a \u0432 \u0441\u0435\u0442\u0438 (\u0441\u043a\u0430\u043d)',
+            title:
+                '\u041f\u043e\u0438\u0441\u043a \u0432 \u0441\u0435\u0442\u0438 (\u0441\u043a\u0430\u043d)',
             bullets: [
               '\u041f\u041a \u0441\u043b\u0443\u0448\u0430\u0435\u0442 discovery \u043d\u0430 UDP \u043f\u043e\u0440\u0442\u0443 5555.',
               '\u0415\u0441\u043b\u0438 \u0441\u043a\u0430\u043d \u043d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0445\u043e\u0434\u0438\u0442 \u2014 \u0447\u0430\u0449\u0435 \u0432\u0441\u0435\u0433\u043e \u043c\u0435\u0448\u0430\u0435\u0442 firewall \u0438\u043b\u0438 VPN.',
@@ -38,7 +57,8 @@ class HelpScreen extends StatelessWidget {
             ],
           ),
           _HelpCard(
-            title: '\u041f\u0435\u0440\u0435\u0434\u0430\u0447\u0430 \u0444\u0430\u0439\u043b\u043e\u0432',
+            title:
+                '\u041f\u0435\u0440\u0435\u0434\u0430\u0447\u0430 \u0444\u0430\u0439\u043b\u043e\u0432',
             bullets: [
               '\u0422\u0435\u043b\u0435\u0444\u043e\u043d \u2192 \u041f\u041a: \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u043f\u0430\u043d\u0435\u043b\u044c \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430 \u2192 \u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0444\u0430\u0439\u043b \u043d\u0430 \u041f\u041a.',
               '\u041f\u041a \u2192 \u0442\u0435\u043b\u0435\u0444\u043e\u043d: \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u0430\u0439\u043b \u0438\u0437 \u043f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u044b \u043d\u0430 \u041f\u041a, \u043f\u043e\u043a\u0430 \u0442\u0435\u043b\u0435\u0444\u043e\u043d \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d (\u043f\u0430\u043d\u0435\u043b\u044c \u0438\u043b\u0438 \u0442\u0430\u0447\u043f\u0430\u0434).',
@@ -46,7 +66,8 @@ class HelpScreen extends StatelessWidget {
             ],
           ),
           _HelpCard(
-            title: '\u0420\u0435\u0448\u0435\u043d\u0438\u0435 \u043f\u0440\u043e\u0431\u043b\u0435\u043c',
+            title:
+                '\u0420\u0435\u0448\u0435\u043d\u0438\u0435 \u043f\u0440\u043e\u0431\u043b\u0435\u043c',
             bullets: [
               '\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u043a\u043e\u0434: \u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u0439\u0442\u0435 \u043d\u043e\u0432\u044b\u0439 \u043a\u043e\u0434 \u043d\u0430 \u041f\u041a \u0438 \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0441\u043d\u043e\u0432\u0430.',
               '\u041d\u0435 \u0432 \u0441\u0435\u0442\u0438: \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 Wi-Fi, IP \u0430\u0434\u0440\u0435\u0441 \u0438 \u0447\u0442\u043e \u0441\u0435\u0440\u0432\u0435\u0440 \u043d\u0430 \u041f\u041a \u0437\u0430\u043f\u0443\u0449\u0435\u043d.',
@@ -78,7 +99,11 @@ class _HelpCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title.toUpperCase(), style: const TextStyle(color: kAccentColor, fontWeight: FontWeight.bold, letterSpacing: 1)),
+          Text(title.toUpperCase(),
+              style: const TextStyle(
+                  color: kAccentColor,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1)),
           const SizedBox(height: 10),
           ...bullets.map(
             (b) => Padding(
@@ -87,7 +112,10 @@ class _HelpCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text('•  ', style: TextStyle(color: Colors.white70)),
-                  Expanded(child: Text(b, style: const TextStyle(color: Colors.white70, height: 1.25))),
+                  Expanded(
+                      child: Text(b,
+                          style: const TextStyle(
+                              color: Colors.white70, height: 1.25))),
                 ],
               ),
             ),

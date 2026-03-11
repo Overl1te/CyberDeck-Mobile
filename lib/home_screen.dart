@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'connect_screen.dart';
 import 'dashboard_screen.dart';
 import 'device_storage.dart';
+import 'errors/error_help_screen.dart';
 import 'help_screen.dart';
 import 'l10n/app_localizations.dart';
 import 'settings_screen.dart';
@@ -152,6 +153,13 @@ class _HomeScreenState extends State<HomeScreen> {
         context, MaterialPageRoute(builder: (_) => const HelpScreen()));
   }
 
+  Future<void> _openErrorGuide() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const ErrorHelpScreen()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -168,11 +176,13 @@ class _HomeScreenState extends State<HomeScreen> {
             onSelected: (val) {
               if (val == 'settings') _openSettings();
               if (val == 'help') _openHelp();
+              if (val == 'errors') _openErrorGuide();
               if (val == 'about') _showAbout(context);
             },
             itemBuilder: (ctx) => [
               const PopupMenuItem(value: 'settings', child: Text('Настройки')),
               const PopupMenuItem(value: 'help', child: Text('Справка')),
+              const PopupMenuItem(value: 'errors', child: Text('Error Guide')),
               const PopupMenuItem(value: 'about', child: Text('О приложении')),
             ],
           )

@@ -55,6 +55,44 @@ class _DeviceSettingsScreenState extends State<DeviceSettingsScreen> {
     await DeviceStorage.saveDeviceSettings(widget.device.id, _s);
   }
 
+  DeviceSettings _applyNetworkProfile(DeviceSettings base, String profile) {
+    switch (profile) {
+      case 'mobile_hotspot':
+        return base.copyWith(
+          networkProfile: profile,
+          lowLatency: true,
+          streamMaxWidth: 1280,
+          streamQuality: 56,
+          streamFps: 30,
+        );
+      case 'low_latency':
+        return base.copyWith(
+          networkProfile: profile,
+          lowLatency: true,
+          streamMaxWidth: 1600,
+          streamQuality: 62,
+          streamFps: 60,
+        );
+      case 'battery_safe':
+        return base.copyWith(
+          networkProfile: profile,
+          lowLatency: false,
+          streamMaxWidth: 960,
+          streamQuality: 50,
+          streamFps: 24,
+        );
+      case 'stable_wifi':
+      default:
+        return base.copyWith(
+          networkProfile: 'stable_wifi',
+          lowLatency: false,
+          streamMaxWidth: 1920,
+          streamQuality: 68,
+          streamFps: 60,
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final title = widget.device.name;
@@ -243,6 +281,47 @@ class _DeviceSettingsScreenState extends State<DeviceSettingsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      ListTile(
+                        title: const Text(
+                            '\u0421\u0435\u0442\u0435\u0432\u043e\u0439 \u043f\u0440\u043e\u0444\u0438\u043b\u044c'),
+                        subtitle: const Text(
+                          '\u0413\u043e\u0442\u043e\u0432\u044b\u0435 \u043f\u0440\u0435\u0441\u0435\u0442\u044b \u0434\u043b\u044f Wi-Fi/\u0442\u043e\u0447\u043a\u0438 \u0434\u043e\u0441\u0442\u0443\u043f\u0430/\u0431\u0430\u0442\u0430\u0440\u0435\u0438',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                        trailing: DropdownButton<String>(
+                          value: _s.networkProfile,
+                          dropdownColor: kPanelColor,
+                          items: const [
+                            DropdownMenuItem(
+                              value: 'stable_wifi',
+                              child: Text(
+                                  '\u0421\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u044b\u0439 Wi-Fi'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'mobile_hotspot',
+                              child: Text(
+                                  '\u0422\u043e\u0447\u043a\u0430 \u0434\u043e\u0441\u0442\u0443\u043f\u0430'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'low_latency',
+                              child: Text(
+                                  '\u041d\u0438\u0437\u043a\u0430\u044f \u0437\u0430\u0434\u0435\u0440\u0436\u043a\u0430'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'battery_safe',
+                              child: Text(
+                                  '\u042d\u043a\u043e\u043d\u043e\u043c\u0438\u044f \u0431\u0430\u0442\u0430\u0440\u0435\u0438'),
+                            ),
+                          ],
+                          onChanged: (v) {
+                            if (v == null) return;
+                            setState(() {
+                              _s = _applyNetworkProfile(_s, v);
+                            });
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 8),
                       _slider(
                         label:
                             '\u041c\u0430\u043a\u0441. \u0448\u0438\u0440\u0438\u043d\u0430 (px)',

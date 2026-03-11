@@ -7,12 +7,41 @@ import 'package:dio/dio.dart';
 class TransferException implements Exception {
   final String message;
   final int? statusCode;
+  final String code;
+  final int? number;
+  final String? incidentId;
+  final String? hint;
 
-  const TransferException(this.message, {this.statusCode});
+  const TransferException(
+    this.message, {
+    this.statusCode,
+    this.code = '',
+    this.number,
+    this.incidentId,
+    this.hint,
+  });
+
+  bool get hasCatalogCode => code.trim().isNotEmpty;
+
+  String get userText {
+    final normalized = message.trim();
+    if (!hasCatalogCode) {
+      return normalized.isEmpty ? 'Transfer failed' : normalized;
+    }
+    if (normalized.isEmpty) return code;
+    return '[$code] $normalized';
+  }
 
   @override
-  String toString() =>
-      statusCode == null ? message : '$message (HTTP $statusCode)';
+  String toString() {
+    final base = userText;
+    final incidentSuffix = (incidentId == null || incidentId!.trim().isEmpty)
+        ? ''
+        : ' (#${incidentId!.trim()})';
+    return statusCode == null
+        ? '$base$incidentSuffix'
+        : '$base$incidentSuffix (HTTP $statusCode)';
+  }
 }
 
 class TransferService {
@@ -48,30 +77,40 @@ class TransferService {
       );
 
       if (response.statusCode != 200) {
-        final serverError = _extractServerErrorCode(response.data);
-        if (serverError == 'upload_checksum_mismatch') {
+        final serverError = _extractServerError(response.data);
+        if (serverError.message == 'upload_checksum_mismatch') {
           throw TransferException(
             'upload_checksum_mismatch',
             statusCode: response.statusCode,
+            code: 'CD-3003',
           );
         }
         throw TransferException(
-          serverError ?? 'Upload failed',
+          serverError.message ?? 'Upload failed',
           statusCode: response.statusCode,
+          code: serverError.code,
+          number: serverError.number,
+          incidentId: serverError.incidentId,
+          hint: serverError.hint,
         );
       }
     } on DioException catch (e) {
       if (CancelToken.isCancel(e)) rethrow;
-      final serverError = _extractServerErrorCode(e.response?.data);
-      if (serverError == 'upload_checksum_mismatch') {
+      final serverError = _extractServerError(e.response?.data);
+      if (serverError.message == 'upload_checksum_mismatch') {
         throw TransferException(
           'upload_checksum_mismatch',
           statusCode: e.response?.statusCode,
+          code: 'CD-3003',
         );
       }
       throw TransferException(
-        serverError ?? 'Upload failed',
+        serverError.message ?? 'Upload failed',
         statusCode: e.response?.statusCode,
+        code: serverError.code,
+        number: serverError.number,
+        incidentId: serverError.incidentId,
+        hint: serverError.hint,
       );
     }
   }
@@ -165,7 +204,11 @@ class TransferService {
 
         final status = response.statusCode ?? 0;
         if (status != 200 && status != 206) {
-          throw TransferException('Download failed', statusCode: status);
+          throw TransferException(
+            'Download failed',
+            statusCode: status,
+            code: 'CD-MOB-3001',
+          );
         }
 
         if (useRange && status == 200 && file.existsSync()) {
@@ -236,24 +279,58 @@ class TransferService {
     return digest.toString();
   }
 
-  String? _extractServerErrorCode(dynamic raw) {
-    if (raw == null) return null;
+  _ParsedTransferError _extractServerError(dynamic raw) {
+    if (raw == null) return const _ParsedTransferError(message: null);
     if (raw is Map) {
       final map = raw.map(
         (key, value) => MapEntry(key.toString(), value),
       );
+      final errorBlockRaw = map['error'];
+      Map<String, dynamic> errorBlock = const <String, dynamic>{};
+      if (errorBlockRaw is Map) {
+        errorBlock = errorBlockRaw.map(
+          (key, value) => MapEntry(key.toString(), value),
+        );
+      }
+      final code = (errorBlock['code'] ?? '').toString().trim();
+      final incidentId = (errorBlock['incident_id'] ?? '').toString().trim();
+      final hint = (errorBlock['hint'] ?? '').toString().trim();
+      final number = _toInt(errorBlock['number']);
       for (final key in const <String>['error', 'detail', 'message', 'code']) {
         final value = map[key];
         if (value == null) continue;
         final text = value.toString().trim();
-        if (text.isNotEmpty) return text;
+        if (text.isNotEmpty) {
+          return _ParsedTransferError(
+            message: text,
+            code: code,
+            number: number,
+            incidentId: incidentId.isEmpty ? null : incidentId,
+            hint: hint.isEmpty ? null : hint,
+          );
+        }
       }
-      return null;
+      return _ParsedTransferError(
+        message: null,
+        code: code,
+        number: number,
+        incidentId: incidentId.isEmpty ? null : incidentId,
+        hint: hint.isEmpty ? null : hint,
+      );
     }
     if (raw is String) {
       final text = raw.trim();
-      if (text.isNotEmpty) return text;
+      if (text.isNotEmpty) {
+        return _ParsedTransferError(message: text);
+      }
     }
+    return const _ParsedTransferError(message: null);
+  }
+
+  int? _toInt(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value.trim());
     return null;
   }
 
@@ -270,4 +347,20 @@ class TransferService {
   void dispose() {
     _dio.close(force: true);
   }
+}
+
+class _ParsedTransferError {
+  final String? message;
+  final String code;
+  final int? number;
+  final String? incidentId;
+  final String? hint;
+
+  const _ParsedTransferError({
+    required this.message,
+    this.code = '',
+    this.number,
+    this.incidentId,
+    this.hint,
+  });
 }

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberDeck-Mobile Error Matrix</title>
+  <style>
+    :root {
+      --bg: #08110c;
+      --panel: #101a14;
+      --line: #2a3f33;
+      --text: #e6f7ef;
+      --muted: #9eb5aa;
+      --accent: #65d9a4;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at top right, #133224 0%, var(--bg) 46%);
+    }
+
+    .wrap {
+      width: min(1200px, 96vw);
+      margin: 0 auto;
+      padding: 24px 0 38px;
+    }
+
+    h1 {
+      margin: 0;
+      color: var(--accent);
+      font-size: clamp(1.3rem, 2.2vw, 1.9rem);
+    }
+
+    .sub,
+    .meta { color: var(--muted); }
+
+    .sub { margin: 8px 0 10px; line-height: 1.4; }
+    .meta { margin: 0 0 12px; font-size: 0.9rem; }
+
+    .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 14px;
+    }
+
+    .links a {
+      color: var(--text);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: #0b120e;
+    }
+
+    .links a:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(16, 26, 20, 0.92);
+      padding: 12px;
+      margin: 0 0 14px;
+    }
+
+    .panel h2 { margin: 0 0 6px; font-size: 1.12rem; }
+    .panel p { margin: 0 0 10px; color: var(--muted); }
+
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 820px;
+      background: #0d1510;
+    }
+
+    th,
+    td {
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid #1b2a22;
+      font-size: 0.93rem;
+      line-height: 1.4;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: #121d16;
+      z-index: 1;
+    }
+
+    code { color: #8ceabd; font-family: Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>CyberDeck-Mobile Error Matrix</h1>
+    <p class="sub">Mobile client error matrix grouped by subsystem.</p>
+    <p class="meta">Updated: 2026-03-08 08:04 UTC | Source: lib/errors/error_catalog.dart</p>
+    <nav class="links"><a href="#pairing">Pairing</a> <a href="#upload">Upload</a> <a href="#auth">Auth</a> <a href="#system">System</a> <a href="#other">Other</a></nav>
+    <section id="pairing" class="panel">
+      <h2>Pairing</h2>
+      <p>Pairing/PIN/QR/approval related errors.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Title</th>
+              <th>Summary</th>
+              <th>Tags</th>
+            </tr>
+          </thead>
+          <tbody>
+<tr><td><code>CD-2001</code></td><td>Лимит попыток PIN</td><td>Слишком много неверных PIN в короткое время.</td><td>pairing, pin</td></tr>
+<tr><td><code>CD-2002</code></td><td>Неверный PIN</td><td>PIN не совпадает с текущим кодом сервера.</td><td>pairing, pin</td></tr>
+<tr><td><code>CD-2003</code></td><td>PIN истек</td><td>Срок действия кода сопряжения завершился.</td><td>pairing, ttl</td></tr>
+<tr><td><code>CD-2102</code></td><td>QR-токен недействителен</td><td>QR-токен устарел, уже использован или поврежден.</td><td>pairing, qr</td></tr>
+<tr><td><code>CD-2103</code></td><td>Ожидается подтверждение на ПК</td><td>Запрос отправлен, но устройство еще не одобрено на хосте.</td><td>pairing, approval</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>    <section id="upload" class="panel">
+      <h2>Upload</h2>
+      <p>Upload and file-transfer related errors.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Title</th>
+              <th>Summary</th>
+              <th>Tags</th>
+            </tr>
+          </thead>
+          <tbody>
+<tr><td><code>CD-3001</code></td><td>Расширение файла запрещено</td><td>Сервер отклонил тип файла по whitelist.</td><td>upload, file</td></tr>
+<tr><td><code>CD-3002</code></td><td>Файл слишком большой</td><td>Превышен лимит размера загрузки.</td><td>upload, limit</td></tr>
+<tr><td><code>CD-3003</code></td><td>Не совпала контрольная сумма</td><td>Передача повреждена или завершилась с ошибкой целостности.</td><td>upload, checksum</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>    <section id="auth" class="panel">
+      <h2>Auth</h2>
+      <p>Token/permission related errors.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Title</th>
+              <th>Summary</th>
+              <th>Tags</th>
+            </tr>
+          </thead>
+          <tbody>
+<tr><td><code>CD-1401</code></td><td>Неавторизованный запрос</td><td>Токен сессии отсутствует или недействителен.</td><td>auth, token</td></tr>
+<tr><td><code>CD-1403</code></td><td>Недостаточно прав</td><td>Для текущего действия запрещен permission на стороне ПК.</td><td>permissions, security</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>    <section id="system" class="panel">
+      <h2>System</h2>
+      <p>System and input backend related errors.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Title</th>
+              <th>Summary</th>
+              <th>Tags</th>
+            </tr>
+          </thead>
+          <tbody>
+<tr><td><code>CD-5009</code></td><td>Keyboard backend недоступен</td><td>Сервер не может отправить клавиатурное событие в ОС.</td><td>input, keyboard</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>    <section id="other" class="panel">
+      <h2>Other</h2>
+      <p>Errors outside core subsystems (validation/internal/etc).</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Title</th>
+              <th>Summary</th>
+              <th>Tags</th>
+            </tr>
+          </thead>
+          <tbody>
+<tr><td><code>CD-1000</code></td><td>Некорректные входные данные</td><td>Сервер отклонил запрос из-за неверного формата параметров.</td><td>validation, request</td></tr>
+<tr><td><code>CD-9000</code></td><td>Внутренняя ошибка сервера</td><td>На стороне ПК возникла непредвиденная ошибка.</td><td>internal, server</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -70,16 +70,19 @@ class PairingService {
       );
       final payload = _decodeJsonObject(response.body);
       if (response.statusCode == 501) {
-        throw const ApiException('QR login is not supported by the server');
+        throw const ApiException(
+          'QR login is not supported by the server',
+          code: 'CD-2501',
+        );
       }
       if (response.statusCode != 200) {
         if (_isApprovalPending(payload, response.statusCode)) {
-          throw const ApiException('approval_pending');
+          throw const ApiException('approval_pending', code: 'CD-2103');
         }
-        final details = _extractErrorDetails(payload);
-        throw ApiException(
-          details ?? 'QR login failed',
+        throw _extractApiException(
+          payload,
           statusCode: response.statusCode,
+          fallbackMessage: 'QR login failed',
         );
       }
       if (payload == null) {
@@ -91,9 +94,12 @@ class PairingService {
       final token = payload['token']?.toString().trim();
       if (token == null || token.isEmpty) {
         if (_isApprovalPending(payload, response.statusCode)) {
-          throw const ApiException('approval_pending');
+          throw const ApiException('approval_pending', code: 'CD-2103');
         }
-        throw const ApiException('Invalid response: missing token');
+        throw const ApiException(
+          'Invalid response: missing token',
+          code: 'CD-MOB-2001',
+        );
       }
       return PairingResult(
         host: host,
@@ -118,7 +124,7 @@ class PairingService {
     String scheme = 'http',
   }) async {
     if (candidates.isEmpty) {
-      throw const ApiException('Invalid host or port');
+      throw const ApiException('Invalid host or port', code: 'CD-MOB-2002');
     }
 
     final normalizedScheme = _normalizeScheme(scheme);
@@ -148,20 +154,29 @@ class PairingService {
         }
         if (response.statusCode != 200) {
           if (_isApprovalPending(payload, response.statusCode)) {
-            lastError = const ApiException('approval_pending');
+            lastError = const ApiException('approval_pending', code: 'CD-2103');
             break;
           }
-          lastError =
-              ApiException('Handshake failed', statusCode: response.statusCode);
+          lastError = _extractApiException(
+            payload,
+            statusCode: response.statusCode,
+            fallbackMessage: 'Handshake failed',
+          );
           continue;
         }
         if (payload == null) {
-          lastError = const ApiException('Invalid response: missing token');
+          lastError = const ApiException(
+            'Invalid response: missing token',
+            code: 'CD-MOB-2001',
+          );
           continue;
         }
         final token = payload['token']?.toString().trim();
         if (token == null || token.isEmpty) {
-          lastError = const ApiException('Invalid response: missing token');
+          lastError = const ApiException(
+            'Invalid response: missing token',
+            code: 'CD-MOB-2001',
+          );
           continue;
         }
         return PairingResult(
@@ -182,7 +197,10 @@ class PairingService {
     }
 
     throw lastError ??
-        const ApiException('Could not connect. Check code, host and port.');
+        const ApiException(
+          'Could not connect. Check code, host and port.',
+          code: 'CD-MOB-2003',
+        );
   }
 
   Future<bool?> getPairingApprovalStatus({
@@ -194,7 +212,7 @@ class PairingService {
     final normalizedScheme = _normalizeScheme(scheme);
     final normalizedToken = token.trim();
     if (normalizedToken.isEmpty) {
-      throw const ApiException('token_required');
+      throw const ApiException('token_required', code: 'CD-1101');
     }
 
     final api = ApiClient(
@@ -215,16 +233,17 @@ class PairingService {
       }
       final payload = _decodeJsonObject(response.body);
       if (response.statusCode != 200) {
-        final details = _extractErrorDetails(payload);
-        throw ApiException(
-          details ?? 'Pairing status failed',
+        throw _extractApiException(
+          payload,
           statusCode: response.statusCode,
+          fallbackMessage: 'Pairing status failed',
         );
       }
       if (payload == null) {
         throw ApiException(
           'Invalid JSON in response',
           statusCode: response.statusCode,
+          code: 'CD-MOB-1001',
         );
       }
       return _isApproved(payload);
@@ -332,8 +351,44 @@ class PairingService {
     return null;
   }
 
+  ApiException _extractApiException(
+    Map<String, dynamic>? payload, {
+    required int statusCode,
+    required String fallbackMessage,
+  }) {
+    final map = payload ?? const <String, dynamic>{};
+    final rawError = map['error'];
+    Map<String, dynamic> errorBlock = const <String, dynamic>{};
+    if (rawError is Map) {
+      errorBlock = Map<String, dynamic>.from(
+        rawError.map((key, value) => MapEntry(key.toString(), value)),
+      );
+    }
+    final details = _extractErrorDetails(map);
+    final code = (errorBlock['code'] ?? '').toString().trim();
+    final hint = (errorBlock['hint'] ?? '').toString().trim();
+    final incidentId = (errorBlock['incident_id'] ?? '').toString().trim();
+    return ApiException(
+      details ?? fallbackMessage,
+      statusCode: statusCode,
+      code: code,
+      hint: hint.isEmpty ? null : hint,
+      incidentId: incidentId.isEmpty ? null : incidentId,
+      number: _toInt(errorBlock['number']),
+    );
+  }
+
   String? _extractErrorDetails(Map<String, dynamic>? payload) {
     if (payload == null) return null;
+    final rawError = payload['error'];
+    if (rawError is Map) {
+      for (final key in const <String>['title', 'message', 'hint']) {
+        final value = rawError[key];
+        if (value == null) continue;
+        final text = value.toString().trim();
+        if (text.isNotEmpty) return text;
+      }
+    }
     for (final key in const <String>['detail', 'error', 'message']) {
       final value = payload[key];
       if (value == null) continue;
@@ -350,6 +405,7 @@ class PairingService {
 
   static bool isQrLoginFallbackError(Object error) {
     if (error is! ApiException) return false;
+    if (error.code == 'CD-2501') return true;
     if (error.statusCode == 404 || error.statusCode == 501) return true;
     final message = error.message.toLowerCase();
     return message.contains('invalid_or_expired_qr_token') ||
@@ -358,12 +414,14 @@ class PairingService {
 
   static bool isInvalidQrTokenError(Object error) {
     if (error is! ApiException) return false;
+    if (error.code == 'CD-2102') return true;
     final message = error.message.toLowerCase();
     return message.contains('invalid_or_expired_qr_token');
   }
 
   static bool isApprovalPendingError(Object error) {
     if (error is! ApiException) return false;
+    if (error.code == 'CD-2103') return true;
     final message = error.message.toLowerCase();
     return message.contains('approval_pending');
   }
