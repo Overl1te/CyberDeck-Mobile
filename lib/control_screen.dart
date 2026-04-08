@@ -59,6 +59,8 @@ class _ControlScreenState extends State<ControlScreen> {
   String _hudConnectionReason = '';
   int _wsReconnectCount = 0;
   double _wsRttMs = 0;
+  double _wsJitterMs = 0;
+  double _lastWsRttSample = 0;
   String _wsLastError = '';
 
   int _rot = 0;
@@ -78,6 +80,7 @@ class _ControlScreenState extends State<ControlScreen> {
   Offset? _lastAbsSent;
 
   double _lastX = 0, _lastY = 0;
+  Offset? _primaryPointerDownPosition;
   int _lastTapTime = 0;
   bool _isDragging = false;
   bool _isPotentialDrag = false;
@@ -94,14 +97,16 @@ class _ControlScreenState extends State<ControlScreen> {
   double _zoomAccumulator = 0;
   _TwoFingerGesture _twoFingerGesture = _TwoFingerGesture.idle;
 
-  static const double _twoFingerDecisionThreshold = 10;
+  static const double _twoFingerDecisionThreshold = 3;
   static const double _twoFingerZoomStep = 16;
+  static const double _singleTapMoveSlop = 8;
   static const int _zoomHotkeyCooldownMs = 45;
 
   bool _showKeyboard = false;
   bool _keyboardCompact = true;
   bool _showHudDetails = false;
   bool _pcMuted = false;
+  bool _pcVolumeSupported = false;
   bool _volumeBusy = false;
   double _pcVolumeUi = 50;
   int _pcVolumeEstimate = 50;
@@ -125,7 +130,7 @@ class _ControlScreenState extends State<ControlScreen> {
   Offset _cursor = Offset.zero;
   bool _cursorInit = false;
 
-  static const Duration _streamOfferTimeout = Duration(seconds: 3);
+  static const Duration _streamOfferTimeout = Duration(milliseconds: 5500);
   List<_StreamCandidate> _streamCandidates = const <_StreamCandidate>[];
   int _activeStreamCandidate = -1;
   int _streamWidgetNonce = 0;
@@ -134,7 +139,9 @@ class _ControlScreenState extends State<ControlScreen> {
   String _streamStatus = '';
   String _streamBackend = 'unknown';
   String _audioRelayStatus = '';
+  Uri? _offeredAudioRelayUri;
   bool _forceAudioRelayForTs = false;
+  bool _offerAudioRelayForTs = false;
 
   Timer? _candidateTimeoutTimer;
   Timer? _streamReconnectTimer;
@@ -145,6 +152,7 @@ class _ControlScreenState extends State<ControlScreen> {
   Timer? _stallTimer;
   int _stallZeroFpsSeconds = 0;
   Timer? _connectionHealthTimer;
+  static const int _tsPlaybackStartupGraceMs = 4800;
 
   int _lastWsConnectedAtMs = 0;
   int _lastBackendAliveAtMs = 0;
@@ -171,8 +179,8 @@ class _ControlScreenState extends State<ControlScreen> {
     effectiveFps: 0,
   );
   late _AdaptiveStreamParams _adaptiveParams;
-  static const int _adaptiveRestartCooldownFloorMs = 30000;
-  static const int _recoveredStableWindowFloorMs = 20000;
+  static const int _adaptiveRestartCooldownFloorMs = 16000;
+  static const int _recoveredStableWindowFloorMs = 10000;
   int _lastAdaptiveResolveAtMs = 0;
 
   Map<String, dynamic>? _lastStreamOfferPayload;
@@ -182,7 +190,10 @@ class _ControlScreenState extends State<ControlScreen> {
   int _candidateReadyAtMs = 0;
   int _lastStreamFeedbackAtMs = 0;
   bool _streamFeedbackInFlight = false;
+  int _lastServerFeedbackApplyAtMs = 0;
+  int _feedbackLowLatencyUntilMs = 0;
   bool _recoveryInProgress = false;
+  bool _forceStreamQueryToken = false;
   int _readyTransientFailureCount = 0;
   int _lastReadyTransientFailureAtMs = 0;
   int _lastReadyTransientRestartAtMs = 0;
@@ -190,8 +201,21 @@ class _ControlScreenState extends State<ControlScreen> {
   static const int _readyTransientRestartCooldownMs = 1800;
   static const int _readyTransientFailureEscalateCount = 2;
   static const int _readyTransientFailureEscalateCountTs = 3;
+  static const int _serverFeedbackApplyCooldownMs = 15000;
+  static const int _feedbackForceLowLatencyMs = 25000;
+  int _lastAutoRecoveryAtMs = 0;
+  int _autoRecoveryIssueSinceMs = 0;
+  String _autoRecoveryIssueKey = '';
+  static const int _autoRecoveryCooldownMs = 18000;
+  static const int _autoRecoveryIssueGraceMs = 2800;
+  static const int _autoRecoveryDegradedGraceMs = 4500;
   final Map<String, int> _candidateFailureCount = <String, int>{};
   String _lastReadyCandidateSignature = '';
+
+  bool get _isRuLocale =>
+      Localizations.localeOf(context).languageCode.toLowerCase() == 'ru';
+
+  String _tr(String ru, String en) => _isRuLocale ? ru : en;
 
   @override
   void initState() {
@@ -232,6 +256,7 @@ class _ControlScreenState extends State<ControlScreen> {
     if (!mounted) return;
 
     _preferredCandidateSignature = await _loadPreferredCandidateSignature();
+    final streamResolve = _resolveStreamCandidates(reason: 'initial');
     _protocol = await _protocolService.fetchProtocol(_apiClient);
     if (!mounted) return;
 
@@ -254,6 +279,10 @@ class _ControlScreenState extends State<ControlScreen> {
           );
           return;
         }
+        if (type == 'warning') {
+          _handleWsWarningCode((data['code'] ?? '').toString());
+          return;
+        }
         if (type == 'cursor') {
           _updateCursorFromRemote(data);
         }
@@ -274,8 +303,9 @@ class _ControlScreenState extends State<ControlScreen> {
     _startConnectionHealthWatcher();
     _startAdaptiveLoop();
     _startStallWatcher();
+    unawaited(_refreshPcVolumeState());
 
-    await _resolveStreamCandidates(reason: 'initial');
+    await streamResolve;
   }
 
   Future<void> _loadSettings() async {
@@ -342,6 +372,7 @@ class _ControlScreenState extends State<ControlScreen> {
     if (connected && !_isConnected) {
       _lastWsConnectedAtMs = nowMs;
       _lastBackendAliveAtMs = nowMs;
+      unawaited(_refreshPcVolumeState());
     }
 
     if (!connected) {
@@ -353,7 +384,9 @@ class _ControlScreenState extends State<ControlScreen> {
       _activePointers.clear();
       _resetTwoFingerGesture();
       _audioRelayStatus = '';
+      _offeredAudioRelayUri = null;
       _forceAudioRelayForTs = false;
+      _offerAudioRelayForTs = false;
       _lastWsConnectedAtMs = 0;
       _lastBackendAliveAtMs = 0;
       _lastStreamAliveAtMs = 0;
@@ -376,13 +409,49 @@ class _ControlScreenState extends State<ControlScreen> {
   void _onWsRttChanged() {
     final value = _connectionController?.rttMs.value ?? 0;
     if (!mounted) return;
-    setState(() => _wsRttMs = value);
+    final previous = _lastWsRttSample;
+    final delta = previous <= 0 ? 0.0 : (value - previous).abs();
+    final jitter = (_wsJitterMs * 0.75) + (delta * 0.25);
+    setState(() {
+      _wsRttMs = value;
+      _wsJitterMs = jitter;
+      _lastWsRttSample = value;
+    });
   }
 
   void _onWsErrorChanged() {
     final value = _connectionController?.lastError.value ?? '';
     if (!mounted || _wsLastError == value) return;
     setState(() => _wsLastError = value);
+  }
+
+  void _handleWsWarningCode(String code) {
+    if (!mounted) return;
+    final normalized = code.trim().toLowerCase();
+    if (normalized.isEmpty) return;
+    String message;
+    if (normalized == 'permission_denied:perm_power') {
+      message = _tr(
+        'Ограничение прав: команды питания заблокированы',
+        'Permission guard: power actions are blocked',
+      );
+    } else if (normalized == 'launcher_gui_input_blocked') {
+      message = _tr(
+        'Ввод по окну лаунчера ограничен',
+        'Launcher GUI input is protected',
+      );
+    } else if (normalized == 'launcher_gui_keyboard_blocked') {
+      message = _tr(
+        'Клавиатура по окну лаунчера ограничена',
+        'Launcher GUI keyboard input is protected',
+      );
+    } else if (normalized == 'remote_input_locked') {
+      message = _tr('Удаленный ввод заблокирован', 'Remote input is locked');
+    } else {
+      message = code;
+    }
+    if (_wsLastError == message) return;
+    setState(() => _wsLastError = message);
   }
 
   void _onStatsChanged() {
@@ -396,6 +465,19 @@ class _ControlScreenState extends State<ControlScreen> {
       _ram = value.ram;
       _apiRttMs = value.rttMs;
       _apiLastError = value.lastError;
+      if (value.volumeSupported != null) {
+        _pcVolumeSupported = value.volumeSupported!;
+      }
+      if (value.volumePercent != null) {
+        final nextPercent = value.volumePercent!.clamp(0, 100);
+        _pcVolumeEstimate = nextPercent;
+        _pcVolumeUi = nextPercent.toDouble();
+      }
+      if (value.volumeMuted != null) {
+        _pcMuted = value.volumeMuted!;
+      } else if (value.volumePercent != null) {
+        _pcMuted = value.volumePercent! <= 0;
+      }
     });
     _recomputeHudConnectionState();
   }
@@ -405,8 +487,51 @@ class _ControlScreenState extends State<ControlScreen> {
     _connectionHealthTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       _recomputeHudConnectionState();
+      _maybeTriggerAutoRecovery();
     });
     _recomputeHudConnectionState();
+  }
+
+  void _maybeTriggerAutoRecovery() {
+    if (!mounted || _recoveryInProgress || _resolvingStreamOffer) {
+      return;
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (_lastAutoRecoveryAtMs > 0 &&
+        (nowMs - _lastAutoRecoveryAtMs) < _autoRecoveryCooldownMs) {
+      return;
+    }
+
+    final issue = _activeUiError();
+    final degradedState = _hudConnectionState == _HudConnectionState.offline ||
+        _hudConnectionState == _HudConnectionState.degraded;
+    final hasIssue = issue != null || degradedState;
+    if (!hasIssue) {
+      _autoRecoveryIssueKey = '';
+      _autoRecoveryIssueSinceMs = 0;
+      return;
+    }
+
+    final issueKey = issue != null
+        ? 'issue:${issue.code}'
+        : 'state:${_hudConnectionState.name}';
+    if (_autoRecoveryIssueKey != issueKey) {
+      _autoRecoveryIssueKey = issueKey;
+      _autoRecoveryIssueSinceMs = nowMs;
+      return;
+    }
+
+    final graceMs = issue != null
+        ? _autoRecoveryIssueGraceMs
+        : _autoRecoveryDegradedGraceMs;
+    if (_autoRecoveryIssueSinceMs <= 0 ||
+        (nowMs - _autoRecoveryIssueSinceMs) < graceMs) {
+      return;
+    }
+
+    _lastAutoRecoveryAtMs = nowMs;
+    _log('auto-recovery trigger: $issueKey');
+    unawaited(_runSmartRecovery(isAutomatic: true));
   }
 
   void _markStreamAlive() {
@@ -450,19 +575,24 @@ class _ControlScreenState extends State<ControlScreen> {
     String nextReason = '';
     if (!wsConnected) {
       nextState = _HudConnectionState.offline;
-      nextReason = 'канал WS отключен';
+      nextReason = _tr('канал WS отключен', 'WS channel disconnected');
     } else if (!backendFresh) {
       nextState = _HudConnectionState.degraded;
-      nextReason = 'API не отвечает';
+      nextReason = _tr('API не отвечает', 'API is not responding');
     } else if (_resolvingStreamOffer) {
       nextState = _HudConnectionState.connecting;
-      nextReason = 'получение параметров потока';
+      nextReason = _tr(
+        'получение параметров потока',
+        'resolving stream parameters',
+      );
     } else if (!_candidateReady) {
       nextState = _HudConnectionState.connecting;
-      nextReason = _streamStatus.isNotEmpty ? _streamStatus : 'прогрев потока';
+      nextReason = _streamStatus.isNotEmpty
+          ? _streamStatus
+          : _tr('прогрев потока', 'stream warm-up');
     } else if (!streamFresh) {
       nextState = _HudConnectionState.degraded;
-      nextReason = 'видеопоток устарел';
+      nextReason = _tr('видеопоток устарел', 'video stream is stale');
     } else {
       nextState = _HudConnectionState.connected;
     }
@@ -480,13 +610,13 @@ class _ControlScreenState extends State<ControlScreen> {
   String get _hudConnectionLabel {
     switch (_hudConnectionState) {
       case _HudConnectionState.offline:
-        return 'НЕ В СЕТИ';
+        return _tr('НЕ В СЕТИ', 'OFFLINE');
       case _HudConnectionState.connecting:
-        return 'ПОДКЛЮЧЕНИЕ';
+        return _tr('ПОДКЛЮЧЕНИЕ', 'CONNECTING');
       case _HudConnectionState.connected:
-        return 'ПОДКЛЮЧЕНО';
+        return _tr('ПОДКЛЮЧЕНО', 'CONNECTED');
       case _HudConnectionState.degraded:
-        return 'НЕСТАБИЛЬНО';
+        return _tr('НЕСТАБИЛЬНО', 'UNSTABLE');
     }
   }
 
@@ -519,6 +649,15 @@ class _ControlScreenState extends State<ControlScreen> {
     }
   }
 
+  bool _primaryPointerExceededTapSlop(Offset current) {
+    final start = _primaryPointerDownPosition;
+    if (start == null) return false;
+    final dx = current.dx - start.dx;
+    final dy = current.dy - start.dy;
+    return ((dx * dx) + (dy * dy)) >=
+        (_singleTapMoveSlop * _singleTapMoveSlop);
+  }
+
   void _sendHotkey(List<String> keys) {
     if (_settings.haptics) HapticFeedback.lightImpact();
     _send({'type': 'hotkey', 'keys': keys});
@@ -537,20 +676,26 @@ class _ControlScreenState extends State<ControlScreen> {
         _settings = updated;
         if (!next) {
           _audioRelayStatus = '';
+          _offeredAudioRelayUri = null;
           _forceAudioRelayForTs = false;
+          _offerAudioRelayForTs = false;
         }
       });
     } else {
       _settings = updated;
       if (!next) {
         _audioRelayStatus = '';
+        _offeredAudioRelayUri = null;
         _forceAudioRelayForTs = false;
+        _offerAudioRelayForTs = false;
       }
     }
     await DeviceStorage.saveDeviceSettings(widget.deviceId, updated);
     if (!mounted) return;
     await _resolveStreamCandidates(
-      reason: next ? 'звук потока включен' : 'звук потока отключен',
+      reason: next
+          ? _tr('звук потока включен', 'stream audio enabled')
+          : _tr('звук потока отключен', 'stream audio disabled'),
     );
   }
 
@@ -559,32 +704,133 @@ class _ControlScreenState extends State<ControlScreen> {
     setState(() => _pcVolumeUi = value.clamp(0, 100).toDouble());
   }
 
-  Future<void> _applyPcVolume(double value) async {
-    final target = value.round().clamp(0, 100);
-    if (_volumeBusy) return;
-    if (!_isConnected) {
-      if (!mounted) return;
-      setState(() => _pcVolumeUi = target.toDouble());
+  int? _toIntOrNull(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value.toString().trim());
+  }
+
+  bool? _toBoolOrNull(dynamic value) {
+    if (value == null) return null;
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    final normalized = value.toString().trim().toLowerCase();
+    if (normalized == '1' ||
+        normalized == 'true' ||
+        normalized == 'yes' ||
+        normalized == 'on') {
+      return true;
+    }
+    if (normalized == '0' ||
+        normalized == 'false' ||
+        normalized == 'no' ||
+        normalized == 'off') {
+      return false;
+    }
+    return null;
+  }
+
+  void _applyVolumeStatePayload(Map<String, dynamic> payload) {
+    final supported =
+        _toBoolOrNull(payload['supported'] ?? payload['volume_supported']);
+    final percent = _toIntOrNull(payload['volume_percent']);
+    final muted = _toBoolOrNull(payload['muted'] ?? payload['volume_muted']);
+
+    if (!mounted) {
+      if (supported != null) {
+        _pcVolumeSupported = supported;
+      }
+      if (percent != null) {
+        final clamped = percent.clamp(0, 100);
+        _pcVolumeEstimate = clamped;
+        _pcVolumeUi = clamped.toDouble();
+      }
+      if (muted != null) {
+        _pcMuted = muted;
+      } else if (percent != null) {
+        _pcMuted = percent <= 0;
+      }
       return;
     }
 
+    setState(() {
+      if (supported != null) {
+        _pcVolumeSupported = supported;
+      }
+      if (percent != null) {
+        final clamped = percent.clamp(0, 100);
+        _pcVolumeEstimate = clamped;
+        _pcVolumeUi = clamped.toDouble();
+      }
+      if (muted != null) {
+        _pcMuted = muted;
+      } else if (percent != null) {
+        _pcMuted = percent <= 0;
+      }
+    });
+  }
+
+  Future<void> _refreshPcVolumeState() async {
+    if (!_isConnected) return;
+    try {
+      final response = await _apiClient.get(
+        '/volume/state',
+        timeout: const Duration(seconds: 2),
+      );
+      if (response.statusCode != 200) return;
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) return;
+      _applyVolumeStatePayload(Map<String, dynamic>.from(decoded));
+    } catch (_) {
+      // Best effort sync only.
+    }
+  }
+
+  Future<bool> _applyPcVolumeViaApi(int target) async {
+    try {
+      final response = await _apiClient.post(
+        '/volume/set/$target',
+        timeout: const Duration(seconds: 2),
+      );
+      if (response.statusCode != 200) {
+        return false;
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        _applyVolumeStatePayload(Map<String, dynamic>.from(decoded));
+      } else if (mounted) {
+        setState(() {
+          _pcVolumeEstimate = target;
+          _pcVolumeUi = target.toDouble();
+          _pcMuted = target <= 0;
+        });
+      } else {
+        _pcVolumeEstimate = target;
+        _pcVolumeUi = target.toDouble();
+        _pcMuted = target <= 0;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _applyPcVolumeViaMediaKeys(int target) async {
     final current = _pcVolumeEstimate.clamp(0, 100);
     final diff = target - current;
     if (diff == 0) {
-      if (!mounted) return;
-      setState(() => _pcVolumeUi = target.toDouble());
+      if (mounted) {
+        setState(() => _pcVolumeUi = target.toDouble());
+      } else {
+        _pcVolumeUi = target.toDouble();
+      }
       return;
     }
 
     var presses = (diff.abs() / _volumeKeyStepPercent).round();
     presses = presses.clamp(1, _volumeMaxPressesPerApply);
     final action = diff > 0 ? 'vol_up' : 'vol_down';
-
-    if (mounted) {
-      setState(() => _volumeBusy = true);
-    } else {
-      _volumeBusy = true;
-    }
 
     for (var i = 0; i < presses; i++) {
       _send({'type': 'media', 'action': action});
@@ -606,7 +852,6 @@ class _ControlScreenState extends State<ControlScreen> {
       _pcVolumeEstimate = estimated;
       _pcVolumeUi = target.toDouble();
       _pcMuted = estimated <= 0;
-      _volumeBusy = false;
       return;
     }
     setState(() {
@@ -617,24 +862,89 @@ class _ControlScreenState extends State<ControlScreen> {
       } else if (estimated <= 0) {
         _pcMuted = true;
       }
-      _volumeBusy = false;
     });
   }
 
-  void _togglePcMute() {
-    if (!_isConnected) return;
-    _send({'type': 'media', 'action': 'mute'});
+  Future<void> _applyPcVolume(double value) async {
+    final target = value.round().clamp(0, 100);
+    if (_volumeBusy) return;
+    if (!_isConnected) {
+      if (!mounted) return;
+      setState(() => _pcVolumeUi = target.toDouble());
+      return;
+    }
+
+    if (mounted) {
+      setState(() => _volumeBusy = true);
+    } else {
+      _volumeBusy = true;
+    }
+
+    var applied = false;
+    try {
+      applied = await _applyPcVolumeViaApi(target);
+      if (!applied) {
+        await _applyPcVolumeViaMediaKeys(target);
+      }
+    } finally {
+      if (!mounted) {
+        _volumeBusy = false;
+      } else {
+        setState(() => _volumeBusy = false);
+      }
+    }
+
+    if (!applied) {
+      unawaited(_refreshPcVolumeState());
+    }
+  }
+
+  Future<void> _togglePcMute() async {
+    if (!_isConnected || _volumeBusy) return;
     if (_settings.haptics) {
       HapticFeedback.mediumImpact();
     }
-    if (!mounted) {
-      _pcMuted = !_pcMuted;
-      return;
+    if (mounted) {
+      setState(() => _volumeBusy = true);
+    } else {
+      _volumeBusy = true;
     }
-    setState(() => _pcMuted = !_pcMuted);
+
+    var apiApplied = false;
+    try {
+      final response = await _apiClient.post(
+        '/volume/mute',
+        timeout: const Duration(seconds: 2),
+      );
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map) {
+          _applyVolumeStatePayload(Map<String, dynamic>.from(decoded));
+          apiApplied = true;
+        }
+      }
+    } catch (_) {
+      apiApplied = false;
+    }
+
+    if (!apiApplied) {
+      _send({'type': 'media', 'action': 'mute'});
+      if (!mounted) {
+        _pcMuted = !_pcMuted;
+      } else {
+        setState(() => _pcMuted = !_pcMuted);
+      }
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    await _refreshPcVolumeState();
+    if (mounted) {
+      setState(() => _volumeBusy = false);
+    } else {
+      _volumeBusy = false;
+    }
   }
 
-  bool get _isTabletControlMode => _settings.controlMode == 'tablet';
+  bool get _isTabletControlMode => false;
 
   Size _displayFrameSize() {
     if (_frameSize.width <= 0 || _frameSize.height <= 0) {
@@ -665,11 +975,10 @@ class _ControlScreenState extends State<ControlScreen> {
     if (rect.isEmpty || rect.width <= 0 || rect.height <= 0) {
       return null;
     }
-    if (!rect.contains(position)) {
-      return null;
-    }
-    final dx = ((position.dx - rect.left) / rect.width).clamp(0.0, 1.0);
-    final dy = ((position.dy - rect.top) / rect.height).clamp(0.0, 1.0);
+    final clampedX = position.dx.clamp(rect.left, rect.right).toDouble();
+    final clampedY = position.dy.clamp(rect.top, rect.bottom).toDouble();
+    final dx = ((clampedX - rect.left) / rect.width).clamp(0.0, 1.0);
+    final dy = ((clampedY - rect.top) / rect.height).clamp(0.0, 1.0);
 
     switch (_rot % 360) {
       case 90:
@@ -683,34 +992,43 @@ class _ControlScreenState extends State<ControlScreen> {
     }
   }
 
+  int _pointerMoveIntervalMs() {
+    final rtt = _currentRttMs;
+    final jitter = _wsJitterMs;
+    var interval = 14;
+    if (rtt >= 360 || jitter >= 95) {
+      interval = 30;
+    } else if (rtt >= 240 || jitter >= 65) {
+      interval = 24;
+    } else if (rtt >= 160 || jitter >= 35) {
+      interval = 18;
+    }
+    if (_hudConnectionState == _HudConnectionState.degraded) {
+      interval += 2;
+    }
+    if (_isTabletControlMode) {
+      interval -= 4;
+    }
+    return interval.clamp(
+        _isTabletControlMode ? 8 : 12, _isTabletControlMode ? 28 : 34);
+  }
+
   void _sendAbsoluteMoveForPosition(Offset position) {
     final normalized = _normalizedPointerFromSurface(position);
     if (normalized == null) return;
     final now = DateTime.now().millisecondsSinceEpoch;
+    final minIntervalMs = _pointerMoveIntervalMs();
     final last = _lastAbsSent;
     if (last != null) {
       final dist = (normalized - last).distance;
-      if (dist < 0.0016 && (now - _lastAbsSendTime) < 24) {
+      final minDistance = _isDragging ? 0.0007 : 0.0012;
+      if (dist < minDistance && (now - _lastAbsSendTime) < minIntervalMs) {
         return;
       }
     }
     _lastAbsSent = normalized;
     _lastAbsSendTime = now;
     _send({'type': 'move_abs', 'x': normalized.dx, 'y': normalized.dy});
-  }
-
-  Future<void> _setControlMode(String mode) async {
-    final normalized = mode == 'tablet' ? 'tablet' : 'touchpad';
-    if (_settings.controlMode == normalized) return;
-    final updated = _settings.copyWith(controlMode: normalized);
-    if (mounted) {
-      setState(() => _settings = updated);
-    } else {
-      _settings = updated;
-    }
-    _lastAbsSent = null;
-    _lastAbsSendTime = 0;
-    await DeviceStorage.saveDeviceSettings(widget.deviceId, updated);
   }
 
   Future<void> _openErrorGuide({String initialQuery = ''}) async {
@@ -731,29 +1049,47 @@ class _ControlScreenState extends State<ControlScreen> {
     return _NetworkProfileExt.fromStorage(_settings.networkProfile);
   }
 
+  bool get _effectiveLowLatency {
+    if (_settings.lowLatency) return true;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    return nowMs < _feedbackLowLatencyUntilMs;
+  }
+
   String _networkProfileLabel(_NetworkProfile profile) {
     switch (profile) {
       case _NetworkProfile.stableWifi:
-        return 'Стабильный Wi-Fi';
+        return _tr('Стабильный Wi-Fi', 'Stable Wi-Fi');
       case _NetworkProfile.mobileHotspot:
-        return 'Точка доступа';
+        return _tr('Точка доступа', 'Mobile hotspot');
       case _NetworkProfile.lowLatency:
-        return 'Низкая задержка';
+        return _tr('Низкая задержка', 'Low latency');
       case _NetworkProfile.batterySafe:
-        return 'Экономия батареи';
+        return _tr('Экономия батареи', 'Battery saver');
     }
   }
 
   String _networkProfileSubtitle(_NetworkProfile profile) {
     switch (profile) {
       case _NetworkProfile.stableWifi:
-        return 'Сбалансированное качество для стабильной сети';
+        return _tr(
+          'Сбалансированное качество для стабильной сети',
+          'Balanced quality for stable networks',
+        );
       case _NetworkProfile.mobileHotspot:
-        return 'Повышенная устойчивость для нестабильной сети';
+        return _tr(
+          'Повышенная устойчивость для нестабильной сети',
+          'Higher resiliency for unstable networks',
+        );
       case _NetworkProfile.lowLatency:
-        return 'Приоритет отклика над качеством картинки';
+        return _tr(
+          'Приоритет отклика над качеством картинки',
+          'Lower latency over image quality',
+        );
       case _NetworkProfile.batterySafe:
-        return 'Сниженный FPS и битрейт для экономии батареи';
+        return _tr(
+          'Сниженный FPS и битрейт для экономии батареи',
+          'Lower FPS/bitrate for battery savings',
+        );
     }
   }
 
@@ -835,7 +1171,10 @@ class _ControlScreenState extends State<ControlScreen> {
     if (picked == null) return;
     await _applyNetworkProfilePreset(
       picked,
-      reason: 'профиль сети: ${_networkProfileLabel(picked)}',
+      reason: _tr(
+        'профиль сети: ${_networkProfileLabel(picked)}',
+        'network profile: ${_networkProfileLabel(picked)}',
+      ),
       announceInStatus: true,
     );
   }
@@ -888,12 +1227,18 @@ class _ControlScreenState extends State<ControlScreen> {
     }
   }
 
-  Future<void> _runSmartRecovery() async {
+  Future<void> _runSmartRecovery({bool isAutomatic = false}) async {
     if (_recoveryInProgress) return;
+    _lastAutoRecoveryAtMs = DateTime.now().millisecondsSinceEpoch;
     if (mounted) {
       setState(() {
         _recoveryInProgress = true;
-        _streamStatus = 'автовосстановление: переподключение каналов...';
+        _streamStatus = _tr(
+          'автовосстановление: переподключение каналов...',
+          isAutomatic
+              ? 'auto-recovery: issue detected, reconnecting channels...'
+              : 'smart recovery: reconnecting channels...',
+        );
       });
     } else {
       _recoveryInProgress = true;
@@ -903,7 +1248,13 @@ class _ControlScreenState extends State<ControlScreen> {
       _connectionController?.forceReconnect();
       await Future<void>.delayed(const Duration(milliseconds: 450));
       await _resolveStreamCandidates(
-          reason: 'автовосстановление: согласование потока');
+        reason: _tr(
+          'автовосстановление: согласование потока',
+          isAutomatic
+              ? 'auto-recovery: renegotiating stream'
+              : 'smart recovery: resolving stream',
+        ),
+      );
       await Future<void>.delayed(const Duration(milliseconds: 1400));
       if (!mounted) return;
       final nowMs = DateTime.now().millisecondsSinceEpoch;
@@ -912,7 +1263,10 @@ class _ControlScreenState extends State<ControlScreen> {
       if (!healthy) {
         await _applyNetworkProfilePreset(
           _NetworkProfile.mobileHotspot,
-          reason: 'автовосстановление: переключено на профиль "Точка доступа"',
+          reason: _tr(
+            'автовосстановление: переключено на профиль "Точка доступа"',
+            'smart recovery: switched to "Mobile hotspot" profile',
+          ),
           announceInStatus: true,
           resolveAfter: true,
         );
@@ -1017,14 +1371,18 @@ class _ControlScreenState extends State<ControlScreen> {
     }
 
     if (_twoFingerGesture == _TwoFingerGesture.idle) {
-      final decideZoom = _twoFingerSpanScore >= _twoFingerDecisionThreshold &&
-          _twoFingerSpanScore > (_twoFingerPanScore * 1.25 + 2);
-      final decideScroll = _twoFingerPanScore >= _twoFingerDecisionThreshold &&
-          _twoFingerPanScore > (_twoFingerSpanScore * 1.25 + 2);
-      if (decideZoom) {
-        _twoFingerGesture = _TwoFingerGesture.zoom;
-      } else if (decideScroll) {
+      final decideZoom = _twoFingerSpanScore >=
+              (_twoFingerDecisionThreshold + 2) &&
+          _twoFingerSpanScore > (_twoFingerPanScore * 1.4 + 5);
+      final decideScroll = _twoFingerPanScore >=
+              _twoFingerDecisionThreshold &&
+          (_twoFingerSpanScore <= (_twoFingerPanScore * 1.25 + 3) ||
+              (panDy.abs() >= 1.4 &&
+                  _twoFingerSpanScore <= (_twoFingerPanScore + 4)));
+      if (decideScroll) {
         _twoFingerGesture = _TwoFingerGesture.scroll;
+      } else if (decideZoom) {
+        _twoFingerGesture = _TwoFingerGesture.zoom;
       }
     }
 
@@ -1056,29 +1414,32 @@ class _ControlScreenState extends State<ControlScreen> {
     final pos = _eventPosition(e);
     _activePointers[e.pointer] = pos;
 
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - _lastSendTime < 16) return;
-    _lastSendTime = now;
-
     if (_skipNextMove) {
       _lastX = pos.dx;
       _lastY = pos.dy;
       _skipNextMove = false;
+      _lastSendTime = DateTime.now().millisecondsSinceEpoch;
       return;
     }
 
+    final now = DateTime.now().millisecondsSinceEpoch;
     if (_pointerCount == 2) {
       _handleTwoFingerGesture();
+      _lastSendTime = now;
       _lastX = pos.dx;
       _lastY = pos.dy;
       return;
     }
+    if (now - _lastSendTime < _pointerMoveIntervalMs()) return;
+    _lastSendTime = now;
 
     double dx = pos.dx - _lastX;
     double dy = pos.dy - _lastY;
 
     if (dx.abs() < 0.5 && dy.abs() < 0.5) return;
-    _hasMoved = true;
+    if (_pointerCount != 1 || _primaryPointerExceededTapSlop(pos)) {
+      _hasMoved = true;
+    }
 
     final rotated = _rotateDelta(Offset(dx, dy));
     final sdx = rotated.dx;
@@ -1120,11 +1481,12 @@ class _ControlScreenState extends State<ControlScreen> {
     if (_showKeyboard) return;
     _pointerCount++;
     _maxPointerCount = max(_maxPointerCount, _pointerCount);
-    _skipNextMove = !_isTabletControlMode;
+    _skipNextMove = _pointerCount > 1;
     final pos = _eventPosition(e);
     _activePointers[e.pointer] = pos;
 
     if (_pointerCount == 1) {
+      _primaryPointerDownPosition = pos;
       _lastX = pos.dx;
       _lastY = pos.dy;
       _hasMoved = false;
@@ -1133,12 +1495,14 @@ class _ControlScreenState extends State<ControlScreen> {
       _lastAbsSent = null;
       _lastAbsSendTime = 0;
       _resetTwoFingerGesture();
+      _skipNextMove = false;
       if (_isTabletControlMode) {
         _sendAbsoluteMoveForPosition(pos);
       }
     } else if (_pointerCount == 2) {
       _scrollYAccumulator = 0;
       _resetTwoFingerGesture();
+      _skipNextMove = true;
       final pair = _twoFingerCenterAndDistance();
       if (pair != null) {
         _twoFingerLastCenter = pair.$1;
@@ -1158,10 +1522,16 @@ class _ControlScreenState extends State<ControlScreen> {
     if (_showKeyboard) return;
     _activePointers.remove(e.pointer);
     _pointerCount = max(0, _pointerCount - 1);
-    _skipNextMove = !_isTabletControlMode;
+    _skipNextMove = false;
     if (_pointerCount < 2) {
       _resetTwoFingerGesture();
       _scrollYAccumulator = 0;
+    }
+    if (_pointerCount == 1 && _activePointers.isNotEmpty) {
+      final remaining = _activePointers.values.first;
+      _lastX = remaining.dx;
+      _lastY = remaining.dy;
+      _skipNextMove = true;
     }
 
     if (_pointerCount == 0) {
@@ -1180,19 +1550,27 @@ class _ControlScreenState extends State<ControlScreen> {
 
       _lastTapTime = DateTime.now().millisecondsSinceEpoch;
       _maxPointerCount = 0;
+      _primaryPointerDownPosition = null;
       _activePointers.clear();
       _lastAbsSent = null;
       _lastAbsSendTime = 0;
+      _skipNextMove = false;
     }
   }
 
   void _handlePointerCancel(PointerCancelEvent e) {
     _activePointers.remove(e.pointer);
     _pointerCount = max(0, _pointerCount - 1);
-    _skipNextMove = !_isTabletControlMode;
+    _skipNextMove = false;
     if (_pointerCount < 2) {
       _resetTwoFingerGesture();
       _scrollYAccumulator = 0;
+    }
+    if (_pointerCount == 1 && _activePointers.isNotEmpty) {
+      final remaining = _activePointers.values.first;
+      _lastX = remaining.dx;
+      _lastY = remaining.dy;
+      _skipNextMove = true;
     }
     if (_pointerCount == 0) {
       if (_isDragging) {
@@ -1202,9 +1580,11 @@ class _ControlScreenState extends State<ControlScreen> {
       _isPotentialDrag = false;
       _maxPointerCount = 0;
       _hasMoved = false;
+      _primaryPointerDownPosition = null;
       _activePointers.clear();
       _lastAbsSent = null;
       _lastAbsSendTime = 0;
+      _skipNextMove = false;
     }
   }
 
@@ -1277,13 +1657,13 @@ class _ControlScreenState extends State<ControlScreen> {
     final retry = max(0, retryAttempt);
 
     if (candidate.transport == _StreamTransport.mpegTs) {
-      const baseMs = 6200;
-      final withRetry = baseMs + (retry * 1600);
-      return max(policyMs, min(withRetry, 12000));
+      const baseMs = 6400;
+      final withRetry = baseMs + (retry * 1400);
+      return max(policyMs, min(withRetry, 10800));
     }
 
-    final baseMs = 2400 + (retry * 700);
-    return max(policyMs, min(baseMs, 7000));
+    final baseMs = 3200 + (retry * 900);
+    return max(policyMs, min(baseMs, 7600));
   }
 
   Uri _legacyMjpegUri({
@@ -1298,30 +1678,24 @@ class _ControlScreenState extends State<ControlScreen> {
         'quality': quality.toString(),
         'fps': fps.toString(),
         'cursor': '0',
-        'low_latency': _settings.lowLatency ? '1' : '0',
+        'low_latency': _effectiveLowLatency ? '1' : '0',
       },
     );
   }
 
   Uri _audioRelayUri() {
-    return _apiClient.uri(
-      '/audio_stream',
-      queryParameters: <String, String>{
-        'token': widget.token,
-      },
-    );
+    final query = <String, String>{
+      'token': widget.token,
+    };
+    return _apiClient.uri('/audio_stream', queryParameters: query);
   }
 
   Uri _resolveCandidateUri(String raw) {
-    final parsed = Uri.tryParse(raw);
-    if (parsed != null && parsed.hasScheme) return parsed;
-    final base = Uri(
+    return resolveUriAgainstEndpoint(
+      raw,
       scheme: _httpScheme,
-      host: _endpoint.host,
-      port: _endpoint.port,
-      path: '/',
+      endpoint: _endpoint,
     );
-    return base.resolve(raw);
   }
 
   List<_StreamCandidate> _parseOfferCandidates(ParsedStreamOffer offer) {
@@ -1341,16 +1715,43 @@ class _ControlScreenState extends State<ControlScreen> {
 
   List<_StreamCandidate> _prioritizeCandidates(List<_StreamCandidate> input) {
     if (input.length < 2) return input;
+    final preferCompatibilityRelay =
+        shouldPreferCompatibleRelayTransport(_endpoint.host);
 
     final withFailures = List<_StreamCandidate>.from(input)
       ..sort((a, b) {
         final fa = _candidateFailureCount[a.signature] ?? 0;
         final fb = _candidateFailureCount[b.signature] ?? 0;
         if (fa != fb) return fa.compareTo(fb);
-        final ta = a.transport == _StreamTransport.mpegTs ? 0 : 1;
-        final tb = b.transport == _StreamTransport.mpegTs ? 0 : 1;
+        final ta = preferCompatibilityRelay
+            ? (a.transport == _StreamTransport.mjpeg ? 0 : 1)
+            : (a.transport == _StreamTransport.mpegTs ? 0 : 1);
+        final tb = preferCompatibilityRelay
+            ? (b.transport == _StreamTransport.mjpeg ? 0 : 1)
+            : (b.transport == _StreamTransport.mpegTs ? 0 : 1);
         return ta.compareTo(tb);
       });
+
+    if (preferCompatibilityRelay) {
+      final firstHealthyMjpeg = withFailures.firstWhere(
+        (c) =>
+            c.transport == _StreamTransport.mjpeg &&
+            (_candidateFailureCount[c.signature] ?? 0) < 3,
+        orElse: () => withFailures.first,
+      );
+      if (firstHealthyMjpeg.transport == _StreamTransport.mjpeg &&
+          withFailures.first.signature != firstHealthyMjpeg.signature) {
+        final out = <_StreamCandidate>[firstHealthyMjpeg];
+        for (final c in withFailures) {
+          if (c.signature == firstHealthyMjpeg.signature) continue;
+          out.add(c);
+        }
+        _log(
+          'prefer compatibility relay candidate first: ${firstHealthyMjpeg.signature}',
+        );
+        return out;
+      }
+    }
 
     final hasHealthyMpegTs = withFailures.any(
       (c) =>
@@ -1392,6 +1793,16 @@ class _ControlScreenState extends State<ControlScreen> {
     final preferred = withFailures[idx];
     final preferredFailures = _candidateFailureCount[preferred.signature] ?? 0;
     if (preferredFailures >= 3) return withFailures;
+    if (preferCompatibilityRelay &&
+        preferred.transport == _StreamTransport.mjpeg) {
+      final out = <_StreamCandidate>[preferred];
+      for (var i = 0; i < withFailures.length; i++) {
+        if (i == idx) continue;
+        out.add(withFailures[i]);
+      }
+      _log('prefer last ready compatibility relay candidate first');
+      return out;
+    }
     if (firstHealthyTs != null &&
         preferred.transport != _StreamTransport.mpegTs) {
       if (withFailures.first.signature != firstHealthyTs.signature) {
@@ -1435,7 +1846,6 @@ class _ControlScreenState extends State<ControlScreen> {
     _candidateReady = false;
     _stallZeroFpsSeconds = 0;
     _lastStreamAliveAtMs = 0;
-    _forceAudioRelayForTs = false;
   }
 
   Future<void> _resolveStreamCandidates({String reason = ''}) async {
@@ -1458,12 +1868,14 @@ class _ControlScreenState extends State<ControlScreen> {
 
     final candidates = <_StreamCandidate>[];
     var status = reason;
+    var offerAudioRelayForTs = false;
+    Uri? offeredAudioRelayUri;
 
     try {
       final response = await _apiClient.get(
         '/api/stream_offer',
         queryParameters: <String, String>{
-          'low_latency': _settings.lowLatency ? '1' : '0',
+          'low_latency': _effectiveLowLatency ? '1' : '0',
           'audio': _settings.streamAudio ? '1' : '0',
           'max_w': _adaptiveParams.maxWidth.toString(),
           'quality': _adaptiveParams.quality.toString(),
@@ -1478,11 +1890,11 @@ class _ControlScreenState extends State<ControlScreen> {
           payload,
           resolveCandidateUri: _resolveCandidateUri,
           token: widget.token,
-          includeAuthQueryToken: true,
+          includeAuthQueryToken: _forceStreamQueryToken,
           maxWidth: _adaptiveParams.maxWidth,
           quality: _adaptiveParams.quality,
           fps: _adaptiveParams.fps,
-          lowLatency: _settings.lowLatency,
+          lowLatency: _effectiveLowLatency,
         );
         _lastStreamOfferPayload = offer.raw;
         _fallbackPolicy = offer.fallbackPolicy;
@@ -1490,6 +1902,9 @@ class _ControlScreenState extends State<ControlScreen> {
         _applyAdaptiveHint(offer.adaptiveHint);
         _streamBackend = offer.backend;
         candidates.addAll(_parseOfferCandidates(offer));
+        offeredAudioRelayUri = offer.audioRelayUri;
+        offerAudioRelayForTs = offeredAudioRelayUri != null ||
+            _offerIndicatesSeparateAudioRelay(offer.raw);
         final hasMpegTs = candidates.any(
           (c) => c.transport == _StreamTransport.mpegTs,
         );
@@ -1545,7 +1960,7 @@ class _ControlScreenState extends State<ControlScreen> {
       ),
     );
 
-    final normalized = withFallback
+    var normalized = withFallback
         .map((c) => _StreamCandidate(
               uri: c.uri,
               mime: c.mime,
@@ -1557,6 +1972,21 @@ class _ControlScreenState extends State<ControlScreen> {
             ))
         .toList(growable: false);
 
+    if (shouldRestrictToCompatibleRelayTransport(_endpoint.host)) {
+      final compatibleOnly = normalized
+          .where((c) => c.transport == _StreamTransport.mjpeg)
+          .toList(growable: false);
+      if (compatibleOnly.isNotEmpty && compatibleOnly.length != normalized.length) {
+        normalized = compatibleOnly;
+        status = status.isEmpty
+            ? 'compatibility relay mode: MJPEG only'
+            : '$status | compatibility relay mode: MJPEG only';
+        _log(
+          'compatibility relay filter applied: keeping ${compatibleOnly.length} MJPEG candidate(s)',
+        );
+      }
+    }
+
     final ordered = _prioritizeCandidates(normalized);
 
     if (!mounted || requestId != _streamRequestId) return;
@@ -1567,6 +1997,8 @@ class _ControlScreenState extends State<ControlScreen> {
       _activeStreamCandidate = ordered.isEmpty ? -1 : 0;
       _streamWidgetNonce++;
       _streamStatus = status;
+      _offeredAudioRelayUri = offeredAudioRelayUri;
+      _offerAudioRelayForTs = offerAudioRelayForTs;
       _resetStreamMetrics();
     });
     _recomputeHudConnectionState();
@@ -1588,6 +2020,39 @@ class _ControlScreenState extends State<ControlScreen> {
     return !h264 && !h265;
   }
 
+  bool _offerIndicatesSeparateAudioRelay(Map<String, dynamic>? raw) {
+    if (!_settings.streamAudio || raw == null || raw.isEmpty) return false;
+    final audio = raw['audio'];
+    if (audio is Map) {
+      final requested = _asBool(audio['requested']) || _settings.streamAudio;
+      final separate = _asBool(audio['separate']);
+      final separateUrl = (audio['separate_url'] ?? '').toString().trim();
+      if (requested && (separate || separateUrl.isNotEmpty)) {
+        return true;
+      }
+    }
+    final candidates = raw['candidates'];
+    if (candidates is! List) return false;
+    for (final item in candidates) {
+      if (item is! Map) continue;
+      final id = (item['id'] ?? '').toString().trim().toLowerCase();
+      final kind = (item['kind'] ?? item['media'] ?? item['track_type'] ?? '')
+          .toString()
+          .trim()
+          .toLowerCase();
+      final mime = (item['mime'] ?? item['content_type'] ?? item['type'] ?? '')
+          .toString()
+          .trim()
+          .toLowerCase();
+      if (id.startsWith('audio') ||
+          kind == 'audio' ||
+          mime.startsWith('audio/')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   bool _asBool(dynamic value) {
     if (value is bool) return value;
     if (value is num) return value != 0;
@@ -1597,6 +2062,13 @@ class _ControlScreenState extends State<ControlScreen> {
       if (v == '0' || v == 'false' || v == 'no' || v == 'off') return false;
     }
     return false;
+  }
+
+  int _asInt(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value.trim()) ?? 0;
+    return 0;
   }
 
   void _switchToNextCandidate(String reason) {
@@ -1694,6 +2166,27 @@ class _ControlScreenState extends State<ControlScreen> {
       final prev = _candidateFailureCount[candidate.signature] ?? 0;
       _candidateFailureCount[candidate.signature] = prev + 1;
     }
+
+    if (!_forceStreamQueryToken && _looksLikeStreamAuthFailure(normalized)) {
+      _forceStreamQueryToken = true;
+      if (mounted) {
+        setState(() {
+          _streamStatus = _tr(
+            'включен режим URL-token для совместимости стрима',
+            'enabled URL-token compatibility mode for stream',
+          );
+        });
+      }
+      unawaited(
+        _resolveStreamCandidates(
+          reason: _tr(
+            'повторное согласование стрима после auth-ошибки',
+            'renegotiating stream after auth failure',
+          ),
+        ),
+      );
+      return;
+    }
     if (_candidateReady) {
       final transientFailure = normalized.contains('timeout') ||
           normalized.contains('connect') ||
@@ -1726,8 +2219,10 @@ class _ControlScreenState extends State<ControlScreen> {
           return;
         }
         if (mounted && _streamStatus.isEmpty) {
-          setState(() => _streamStatus =
-              'краткий сбой потока, ожидание восстановления...');
+          setState(() => _streamStatus = _tr(
+                'краткий сбой потока, ожидание восстановления...',
+                'transient stream issue, waiting for recovery...',
+              ));
         }
         return;
       }
@@ -1758,6 +2253,14 @@ class _ControlScreenState extends State<ControlScreen> {
     _switchToNextCandidate(reason);
   }
 
+  bool _looksLikeStreamAuthFailure(String normalized) {
+    return normalized.contains('401') ||
+        normalized.contains('403') ||
+        normalized.contains('unauthorized') ||
+        normalized.contains('forbidden') ||
+        normalized.contains('permission_denied');
+  }
+
   void _scheduleStreamReconnect(String reason) {
     _streamReconnectTimer?.cancel();
     final delayMs = _streamReconnectHintMs.clamp(1200, 30000);
@@ -1773,6 +2276,17 @@ class _ControlScreenState extends State<ControlScreen> {
     _stallTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       final candidate = _currentStreamCandidate;
       if (candidate == null || !_candidateReady) {
+        _stallZeroFpsSeconds = 0;
+        return;
+      }
+      if (candidate.transport == _StreamTransport.mpegTs) {
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        final readyAgeMs =
+            _candidateReadyAtMs <= 0 ? 0 : nowMs - _candidateReadyAtMs;
+        if (_lastStreamAliveAtMs <= 0 &&
+            readyAgeMs >= _tsPlaybackStartupGraceMs) {
+          _switchToNextCandidate('TS playback stalled');
+        }
         _stallZeroFpsSeconds = 0;
         return;
       }
@@ -1948,13 +2462,15 @@ class _ControlScreenState extends State<ControlScreen> {
   void _pushStreamFeedback(double effectiveFps) {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     if (_streamFeedbackInFlight) return;
-    if ((nowMs - _lastStreamFeedbackAtMs) < 1800) return;
+    if ((nowMs - _lastStreamFeedbackAtMs) < 1200) return;
     _lastStreamFeedbackAtMs = nowMs;
     _streamFeedbackInFlight = true;
 
     final rttMs = max(0.0, _currentRttMs);
-    final jitterMs =
-        (_wsRttMs > 0 && _apiRttMs > 0) ? (_wsRttMs - _apiRttMs).abs() : 0.0;
+    final jitterMs = max(
+      _wsJitterMs,
+      (_wsRttMs > 0 && _apiRttMs > 0) ? (_wsRttMs - _apiRttMs).abs() : 0.0,
+    );
     final candidate = _currentStreamCandidate;
     final dropRatio = candidate?.transport == _StreamTransport.mjpeg
         ? _streamDuplicateRatio.clamp(0.0, 0.98)
@@ -1962,22 +2478,111 @@ class _ControlScreenState extends State<ControlScreen> {
 
     unawaited(() async {
       try {
-        await _apiClient.post(
+        final response = await _apiClient.post(
           '/api/stream_feedback',
           queryParameters: <String, String>{
             'rtt_ms': rttMs.toStringAsFixed(1),
             'jitter_ms': jitterMs.toStringAsFixed(1),
             'drop_ratio': dropRatio.toStringAsFixed(3),
             'decode_fps': max(0.0, effectiveFps).toStringAsFixed(2),
+            'max_w': _adaptiveParams.maxWidth.toString(),
+            'quality': _adaptiveParams.quality.toString(),
+            'fps': _adaptiveParams.fps.toString(),
+            'low_latency': _effectiveLowLatency ? '1' : '0',
           },
           timeout: const Duration(seconds: 1),
         );
-      } catch (_) {
-        // Best-effort telemetry only.
+        if (!mounted || response.statusCode != 200) return;
+        final decoded = jsonDecode(response.body);
+        if (decoded is! Map) return;
+        _applyServerFeedbackSuggestion(Map<String, dynamic>.from(decoded));
+      } catch (error) {
+        _log('stream feedback push skipped: $error');
       } finally {
         _streamFeedbackInFlight = false;
       }
     }());
+  }
+
+  void _applyServerFeedbackSuggestion(Map<String, dynamic> payload) {
+    if (!mounted || _resolvingStreamOffer || !_candidateReady) return;
+    final profile = (payload['network_profile'] ?? payload['profile'] ?? '')
+        .toString()
+        .trim()
+        .toLowerCase();
+    final suggestedRaw = payload['suggested'];
+    if (suggestedRaw is! Map) return;
+
+    final fpsDelta = _asInt(suggestedRaw['fps_delta']);
+    final widthDelta = _asInt(suggestedRaw['max_w_delta']);
+    final qualityDelta = _asInt(suggestedRaw['quality_delta']);
+    final preferLowLatency = _asBool(suggestedRaw['prefer_low_latency']);
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (preferLowLatency && !_settings.lowLatency) {
+      final until = nowMs + _feedbackForceLowLatencyMs;
+      if (until > _feedbackLowLatencyUntilMs) {
+        _feedbackLowLatencyUntilMs = until;
+      }
+    } else if (profile == 'good' && !_settings.lowLatency) {
+      _feedbackLowLatencyUntilMs = 0;
+    }
+
+    final hasNegativePressure =
+        fpsDelta < 0 || widthDelta < 0 || qualityDelta < 0;
+    final shouldDowngrade = profile == 'critical';
+    if (!shouldDowngrade || !hasNegativePressure) return;
+
+    final cooldownMs = max(
+      _serverFeedbackApplyCooldownMs,
+      _adaptiveHint.minSwitchIntervalMs ~/ 2,
+    );
+    if (_lastAdaptiveResolveAtMs > 0 &&
+        (nowMs - _lastAdaptiveResolveAtMs) < cooldownMs) {
+      return;
+    }
+    if (_lastServerFeedbackApplyAtMs > 0 &&
+        (nowMs - _lastServerFeedbackApplyAtMs) < cooldownMs) {
+      return;
+    }
+
+    final nextWidthRaw = (_adaptiveParams.maxWidth + widthDelta)
+        .clamp(_adaptiveHint.minWidthFloor, _adaptiveHint.maxMaxWidth)
+        .toInt();
+    final next = _adaptiveParams.copyWith(
+      maxWidth: _adaptiveHint.normalizeWidth(nextWidthRaw),
+      quality: (_adaptiveParams.quality + qualityDelta)
+          .clamp(_adaptiveHint.minQuality, _adaptiveHint.maxQuality)
+          .toInt(),
+      fps: (_adaptiveParams.fps + fpsDelta)
+          .clamp(_adaptiveHint.minFps, _adaptiveHint.maxFps)
+          .toInt(),
+    );
+    if (next == _adaptiveParams) return;
+
+    final previous = _adaptiveParams;
+    final reason = _tr(
+      'adaptive server: $profile w ${previous.maxWidth}->${next.maxWidth} '
+          'q ${previous.quality}->${next.quality} '
+          'fps ${previous.fps}->${next.fps}',
+      'adaptive server: $profile w ${previous.maxWidth}->${next.maxWidth} '
+          'q ${previous.quality}->${next.quality} '
+          'fps ${previous.fps}->${next.fps}',
+    );
+    setState(() {
+      _adaptiveParams = next;
+      _streamStatus = reason;
+    });
+    _log(
+      'adaptive server feedback apply: profile=$profile '
+      'w=${previous.maxWidth}->${next.maxWidth} '
+      'q=${previous.quality}->${next.quality} '
+      'fps=${previous.fps}->${next.fps} '
+      'prefer_low_latency=$preferLowLatency',
+    );
+    _lastServerFeedbackApplyAtMs = nowMs;
+    _lastAdaptiveResolveAtMs = nowMs;
+    unawaited(_resolveStreamCandidates(reason: reason));
   }
 
   int _mjpegDecodeCacheWidth(BuildContext context) {
@@ -2067,13 +2672,17 @@ class _ControlScreenState extends State<ControlScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Нет доступных видеопотоков',
-                style: TextStyle(color: Colors.grey)),
+            Text(
+              _tr('Нет доступных видеопотоков',
+                  'No stream candidates available'),
+              style: const TextStyle(color: Colors.grey),
+            ),
             const SizedBox(height: 12),
             ElevatedButton(
-              onPressed: () =>
-                  _resolveStreamCandidates(reason: 'повторный запуск потока'),
-              child: const Text('Повторить'),
+              onPressed: () => _resolveStreamCandidates(
+                reason: _tr('повторный запуск потока', 'retry stream startup'),
+              ),
+              child: Text(_tr('Повторить', 'Retry')),
             ),
           ],
         ),
@@ -2098,7 +2707,7 @@ class _ControlScreenState extends State<ControlScreen> {
             'Authorization': 'Bearer ${widget.token}',
           },
           startupTimeout: Duration(milliseconds: startupMs),
-          lowLatency: _settings.lowLatency,
+          lowLatency: _effectiveLowLatency,
           onReady: _markCandidateReady,
           onPlaybackActivity: _markStreamAlive,
           onAudioReady: _onTsAudioReady,
@@ -2121,7 +2730,7 @@ class _ControlScreenState extends State<ControlScreen> {
           headers: <String, String>{
             'Authorization': 'Bearer ${widget.token}',
           },
-          lowLatency: _settings.lowLatency,
+          lowLatency: _effectiveLowLatency,
           cacheWidth: _mjpegDecodeCacheWidth(context),
           initialFrameTimeout:
               Duration(milliseconds: _fallbackPolicy.candidateTimeoutMs),
@@ -2163,17 +2772,24 @@ class _ControlScreenState extends State<ControlScreen> {
     }
   }
 
+  bool _isTsAudioRestoredStatus(String status) {
+    final normalized = status.trim().toLowerCase();
+    return normalized.contains('ts-аудио восстанов') ||
+        normalized.contains('ts audio restored');
+  }
+
   void _onTsAudioReady() {
     if (!mounted) return;
-    if (!_forceAudioRelayForTs) {
-      if (_audioRelayStatus == 'TS-аудио восстановлено') {
+    if (!_forceAudioRelayForTs && !_offerAudioRelayForTs) {
+      if (_isTsAudioRestoredStatus(_audioRelayStatus)) {
         setState(() => _audioRelayStatus = '');
       }
       return;
     }
     setState(() {
       _forceAudioRelayForTs = false;
-      _audioRelayStatus = 'TS-аудио восстановлено';
+      _offerAudioRelayForTs = false;
+      _audioRelayStatus = _tr('TS-аудио восстановлено', 'TS audio restored');
     });
   }
 
@@ -2186,30 +2802,32 @@ class _ControlScreenState extends State<ControlScreen> {
     if (_forceAudioRelayForTs) return;
     setState(() {
       _forceAudioRelayForTs = true;
-      _audioRelayStatus =
-          'TS-аудио недоступно ($reason), включен резервный relay';
+      _audioRelayStatus = _tr(
+        'TS-аудио недоступно ($reason), включен резервный relay',
+        'TS audio unavailable ($reason), fallback relay enabled',
+      );
     });
   }
 
   bool get _shouldPlayAudioRelay {
     if (!_settings.streamAudio) return false;
-    if (!_isConnected) return false;
     final candidate = _currentStreamCandidate;
     if (candidate == null) return false;
     if (candidate.transport == _StreamTransport.mjpeg) return true;
-    return _forceAudioRelayForTs;
+    return _forceAudioRelayForTs || _offerAudioRelayForTs;
   }
 
   Widget _buildAudioRelayWidget() {
     if (!_shouldPlayAudioRelay) return const SizedBox.shrink();
+    final relayUri = _offeredAudioRelayUri ?? _audioRelayUri();
     return AudioRelayView(
-      streamUrl: _audioRelayUri().toString(),
+      streamUrl: relayUri.toString(),
       headers: <String, String>{
         'Authorization': 'Bearer ${widget.token}',
       },
       enabled: true,
-      enableReadinessProbe: false,
-      startupTimeout: const Duration(seconds: 16),
+      enableReadinessProbe: true,
+      startupTimeout: const Duration(seconds: 8),
       onReady: () {
         if (!mounted || _audioRelayStatus.isEmpty) return;
         _log('audio relay ready');
@@ -2217,7 +2835,10 @@ class _ControlScreenState extends State<ControlScreen> {
       },
       onFailure: (reason) {
         if (!mounted || !_settings.streamAudio) return;
-        final status = 'ошибка аудио relay: $reason';
+        final status = _tr(
+          'ошибка аудио relay: $reason',
+          'audio relay failed: $reason',
+        );
         if (_audioRelayStatus == status) return;
         _log(status);
         setState(() => _audioRelayStatus = status);
@@ -2227,7 +2848,7 @@ class _ControlScreenState extends State<ControlScreen> {
 
   String _streamDetailsLabel() {
     final candidate = _currentStreamCandidate;
-    if (candidate == null) return 'Поток не выбран';
+    if (candidate == null) return _tr('Поток не выбран', 'No stream selected');
     if (candidate.transport == _StreamTransport.mpegTs) {
       return '${candidate.backend} TS ${candidate.mime}';
     }
@@ -2244,12 +2865,16 @@ class _ControlScreenState extends State<ControlScreen> {
                 : _ChannelState.ok,
             detail: _wsRttMs > 0
                 ? '${_wsRttMs.toStringAsFixed(0)} ms'
-                : (_wsLastError.isNotEmpty ? _wsLastError : 'подключено'),
+                : (_wsLastError.isNotEmpty
+                    ? _wsLastError
+                    : _tr('подключено', 'connected')),
           )
         : _ChannelStatus(
             name: 'WS',
             state: _ChannelState.down,
-            detail: _wsLastError.isNotEmpty ? _wsLastError : 'отключено',
+            detail: _wsLastError.isNotEmpty
+                ? _wsLastError
+                : _tr('отключено', 'disconnected'),
           );
 
     final apiFresh = _isBackendFresh(nowMs);
@@ -2259,7 +2884,7 @@ class _ControlScreenState extends State<ControlScreen> {
             state: _ChannelState.warn,
             detail: _apiLastError.isNotEmpty
                 ? _apiLastError
-                : 'статистика устарела',
+                : _tr('статистика устарела', 'stats are stale'),
           )
         : _ChannelStatus(
             name: 'API',
@@ -2270,28 +2895,35 @@ class _ControlScreenState extends State<ControlScreen> {
                 ? _apiLastError
                 : (_apiRttMs > 0
                     ? '${_apiRttMs.toStringAsFixed(0)} ms'
-                    : 'исправен'),
+                    : _tr('исправен', 'healthy')),
           );
 
     final candidate = _currentStreamCandidate;
     _ChannelStatus video;
     if (_resolvingStreamOffer || candidate == null) {
-      video = const _ChannelStatus(
+      video = _ChannelStatus(
         name: 'VIDEO',
         state: _ChannelState.warn,
-        detail: 'получение параметров потока',
+        detail: _tr(
+          'получение параметров потока',
+          'fetching stream parameters',
+        ),
       );
     } else if (!_candidateReady) {
       video = _ChannelStatus(
         name: 'VIDEO',
         state: _ChannelState.warn,
-        detail: _streamStatus.isNotEmpty ? _streamStatus : 'прогрев потока',
+        detail: _streamStatus.isNotEmpty
+            ? _streamStatus
+            : _tr('прогрев потока', 'stream warm-up'),
       );
     } else if (!_isStreamFresh(nowMs)) {
       video = _ChannelStatus(
         name: 'VIDEO',
         state: _ChannelState.down,
-        detail: _streamStatus.isNotEmpty ? _streamStatus : 'поток устарел',
+        detail: _streamStatus.isNotEmpty
+            ? _streamStatus
+            : _tr('поток устарел', 'stream stale'),
       );
     } else {
       video = _ChannelStatus(
@@ -2305,10 +2937,10 @@ class _ControlScreenState extends State<ControlScreen> {
 
     _ChannelStatus audio;
     if (!_settings.streamAudio) {
-      audio = const _ChannelStatus(
+      audio = _ChannelStatus(
         name: 'AUDIO',
         state: _ChannelState.off,
-        detail: 'выключен',
+        detail: _tr('выключен', 'disabled'),
       );
     } else if (_audioRelayStatus.toLowerCase().contains('failed') ||
         _audioRelayStatus.toLowerCase().contains('ошиб')) {
@@ -2321,13 +2953,15 @@ class _ControlScreenState extends State<ControlScreen> {
       audio = _ChannelStatus(
         name: 'AUDIO',
         state: _ChannelState.ok,
-        detail: _forceAudioRelayForTs ? 'резервный relay' : 'relay активен',
+        detail: _forceAudioRelayForTs
+            ? _tr('резервный relay', 'fallback relay')
+            : _tr('relay активен', 'relay active'),
       );
     } else {
-      audio = const _ChannelStatus(
+      audio = _ChannelStatus(
         name: 'AUDIO',
         state: _ChannelState.ok,
-        detail: 'TS встроенный',
+        detail: _tr('TS встроенный', 'TS embedded'),
       );
     }
     return <_ChannelStatus>[ws, api, video, audio];
@@ -2349,13 +2983,13 @@ class _ControlScreenState extends State<ControlScreen> {
   String _channelStateLabel(_ChannelState state) {
     switch (state) {
       case _ChannelState.ok:
-        return 'НОРМ';
+        return _tr('НОРМ', 'OK');
       case _ChannelState.warn:
-        return 'ВНИМ';
+        return _tr('ВНИМ', 'WARN');
       case _ChannelState.down:
-        return 'НЕТ';
+        return _tr('НЕТ', 'DOWN');
       case _ChannelState.off:
-        return 'ВЫКЛ';
+        return _tr('ВЫКЛ', 'OFF');
     }
   }
 
@@ -2479,6 +3113,15 @@ class _ControlScreenState extends State<ControlScreen> {
       'relay активен',
       'резервный relay',
       'ts встроенный',
+      'healthy',
+      'connected',
+      'disconnected',
+      'fetching stream parameters',
+      'stream warm-up',
+      'relay active',
+      'fallback relay',
+      'ts embedded',
+      'disabled',
       'adaptive',
     };
     if (benignExact.contains(normalized)) return false;
@@ -2527,8 +3170,12 @@ class _ControlScreenState extends State<ControlScreen> {
     if (raw == null) return null;
     if (_hudConnectionState == _HudConnectionState.connecting &&
         raw == _hudConnectionReason &&
-        (_hudConnectionReason == 'получение параметров потока' ||
-            _hudConnectionReason == 'прогрев потока')) {
+        (_hudConnectionReason ==
+                _tr(
+                  'получение параметров потока',
+                  'fetching stream parameters',
+                ) ||
+            _hudConnectionReason == _tr('прогрев потока', 'stream warm-up'))) {
       return null;
     }
     final code = _extractCatalogCode(raw) ?? _mapLocalIssueCode(raw);
@@ -2619,7 +3266,7 @@ class _ControlScreenState extends State<ControlScreen> {
               TextButton.icon(
                 onPressed: () => _openErrorGuide(initialQuery: issue.code),
                 icon: const Icon(Icons.menu_book, size: 16),
-                label: const Text('Решение'),
+                label: Text(_tr('Решение', 'Fix')),
               ),
               const SizedBox(width: 4),
               TextButton.icon(
@@ -2628,8 +3275,8 @@ class _ControlScreenState extends State<ControlScreen> {
                     : () => unawaited(_runSmartRecovery()),
                 icon: const Icon(Icons.auto_fix_high, size: 16),
                 label: Text(_recoveryInProgress
-                    ? 'Восстановление...'
-                    : 'Автовосстановление'),
+                    ? _tr('Восстановление...', 'Recovering...')
+                    : _tr('Автовосстановление', 'Auto-recovery')),
               ),
             ],
           ),
@@ -2643,6 +3290,106 @@ class _ControlScreenState extends State<ControlScreen> {
     if (normalized.isEmpty) return Colors.white70;
     if (_isLikelyIssueText(text)) return Colors.orangeAccent;
     return Colors.white70;
+  }
+
+  Map<String, dynamic> _diagMap(dynamic value) {
+    if (value is Map<String, dynamic>) return value;
+    if (value is Map) {
+      return value.map(
+        (dynamic key, dynamic val) => MapEntry(key.toString(), val),
+      );
+    }
+    return <String, dynamic>{};
+  }
+
+  bool _diagBool(dynamic value, {bool fallback = false}) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    final normalized = (value ?? '').toString().trim().toLowerCase();
+    if (normalized == '1' ||
+        normalized == 'true' ||
+        normalized == 'yes' ||
+        normalized == 'on') {
+      return true;
+    }
+    if (normalized == '0' ||
+        normalized == 'false' ||
+        normalized == 'no' ||
+        normalized == 'off') {
+      return false;
+    }
+    return fallback;
+  }
+
+  String _endpointOriginLabel() {
+    final uri = Uri(
+      scheme: _httpScheme,
+      host: _endpoint.host,
+      port: _endpoint.port,
+    );
+    return uri.toString();
+  }
+
+  String _diagnosticsAccessMode(Map<String, dynamic> access) {
+    final effectiveOrigin = (access['effective_origin'] ?? '').toString().trim();
+    final fallbackOrigin = _endpointOriginLabel();
+    final origin = effectiveOrigin.isEmpty ? fallbackOrigin : effectiveOrigin;
+    final host = Uri.tryParse(origin)?.host ?? _endpoint.host;
+    return isPrivateOrLocalHost(host) ? 'LAN' : 'PUBLIC';
+  }
+
+  String _diagnosticsSessionStatus(Map<String, dynamic> session) {
+    if (session.isEmpty) return 'unknown';
+    final name = (session['device_name'] ?? '').toString().trim();
+    final approved = _diagBool(session['approved'], fallback: true);
+    final wsAttached = _diagBool(session['websocket_attached']);
+    final parts = <String>[
+      if (name.isNotEmpty) name,
+      approved ? 'approved' : 'pending approval',
+      wsAttached ? 'ws attached' : 'ws idle',
+    ];
+    return parts.join(' | ');
+  }
+
+  String _diagnosticsWsStatus(Map<String, dynamic> ws) {
+    if (ws.isEmpty) return 'unknown';
+    final connected = _diagBool(ws['connected']);
+    final lastRx = (ws['last_rx_type'] ?? '').toString().trim();
+    final lastTx = (ws['last_tx_type'] ?? '').toString().trim();
+    final parts = <String>[
+      connected ? 'connected' : 'disconnected',
+      if (lastRx.isNotEmpty) 'rx $lastRx',
+      if (lastTx.isNotEmpty) 'tx $lastTx',
+    ];
+    if (parts.length == 1) {
+      parts.add('no traffic yet');
+    }
+    return parts.join(' | ');
+  }
+
+  String _diagnosticsAudioPath(
+    Map<String, dynamic> offerAudio,
+    Map<String, dynamic> streamAudio,
+  ) {
+    if (!_settings.streamAudio) return 'disabled in client';
+    if (_shouldPlayAudioRelay) return 'separate relay active';
+
+    final requested = _diagBool(offerAudio['requested'], fallback: true);
+    final muxed = _diagBool(offerAudio['muxed']);
+    final separate = _diagBool(offerAudio['separate']);
+    final relayAvailable = _diagBool(offerAudio['relay_available']);
+    final realAudio = _diagBool(streamAudio['real_audio_available']);
+    final muxedAvailable = _diagBool(streamAudio['muxed_audio_available']);
+    final silentFallback = _diagBool(streamAudio['silent_fallback_enabled']);
+
+    if (!requested) return 'not requested';
+    if (muxed) return 'muxed in video stream';
+    if (separate) return 'separate relay offered';
+    if (muxedAvailable) return 'muxed audio available';
+    if (relayAvailable || realAudio || silentFallback) {
+      return 'audio backend ready, relay idle';
+    }
+    return 'unavailable';
   }
 
   Future<void> _openDiagnostics() async {
@@ -2664,7 +3411,7 @@ class _ControlScreenState extends State<ControlScreen> {
     final streamOffer = await _fetchJson(
       '/api/stream_offer',
       query: <String, String>{
-        'low_latency': _settings.lowLatency ? '1' : '0',
+        'low_latency': _effectiveLowLatency ? '1' : '0',
         'audio': _settings.streamAudio ? '1' : '0',
         'max_w': _adaptiveParams.maxWidth.toString(),
         'quality': _adaptiveParams.quality.toString(),
@@ -2673,6 +3420,18 @@ class _ControlScreenState extends State<ControlScreen> {
       },
       timeoutSeconds: 3,
     );
+    final diagData = diagPayload.data ?? <String, dynamic>{'error': diagPayload.error};
+    final streamOfferData = streamOffer.data ??
+        _lastStreamOfferPayload ??
+        <String, dynamic>{'error': streamOffer.error};
+    final diagAccess = _diagMap(diagData['access']);
+    final diagSession = _diagMap(diagData['session']);
+    final diagWs = _diagMap(diagData['ws']);
+    final diagStream = _diagMap(diagData['stream']);
+    final streamAudio = _diagMap(diagStream['audio']);
+    final offerAudio = _diagMap(streamOfferData['audio']);
+    final endpointOrigin = _endpointOriginLabel();
+    final effectiveOrigin = (diagAccess['effective_origin'] ?? '').toString().trim();
 
     final report = <String, dynamic>{
       'generated_at': now,
@@ -2693,6 +3452,8 @@ class _ControlScreenState extends State<ControlScreen> {
               },
         'stream_backend': _streamBackend,
         'network_profile': _settings.networkProfile,
+        'low_latency_requested': _settings.lowLatency,
+        'low_latency_effective': _effectiveLowLatency,
         'stream_audio_enabled': _settings.streamAudio,
         'audio_relay_active': _shouldPlayAudioRelay,
         'fps': _streamFps,
@@ -2720,10 +3481,8 @@ class _ControlScreenState extends State<ControlScreen> {
         },
         'adaptive_decision': _lastAdaptiveDecision.toJson(),
       },
-      'diag': diagPayload.data ?? <String, dynamic>{'error': diagPayload.error},
-      'stream_offer': streamOffer.data ??
-          _lastStreamOfferPayload ??
-          <String, dynamic>{'error': streamOffer.error},
+      'diag': diagData,
+      'stream_offer': streamOfferData,
     };
 
     final reportJson = const JsonEncoder.withIndent('  ').convert(report);
@@ -2733,6 +3492,12 @@ class _ControlScreenState extends State<ControlScreen> {
           ? 'none'
           : '${candidate.transport.name} ${candidate.backend}',
       backend: _streamBackend,
+      endpoint: endpointOrigin,
+      effectiveOrigin: effectiveOrigin.isEmpty ? endpointOrigin : effectiveOrigin,
+      accessMode: _diagnosticsAccessMode(diagAccess),
+      sessionStatus: _diagnosticsSessionStatus(diagSession),
+      wsStatus: _diagnosticsWsStatus(diagWs),
+      audioPath: _diagnosticsAudioPath(offerAudio, streamAudio),
       fps: _streamFps,
       decodeMs: _lastDecodeMs,
       rttMs: _currentRttMs,
@@ -2804,12 +3569,12 @@ class _ControlScreenState extends State<ControlScreen> {
           child: TextField(
             controller: _msgController,
             style: const TextStyle(color: Colors.white),
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               isDense: true,
               filled: true,
-              fillColor: Color(0xFF1A1A1A),
-              hintText: 'Ввод текста...',
-              border: OutlineInputBorder(),
+              fillColor: const Color(0xFF1A1A1A),
+              hintText: _tr('Ввод текста...', 'Type text...'),
+              border: const OutlineInputBorder(),
             ),
             onSubmitted: (_) => _sendTextMessage(),
           ),
@@ -2823,12 +3588,12 @@ class _ControlScreenState extends State<ControlScreen> {
             child: InkWell(
               onTap: _sendTextMessage,
               borderRadius: BorderRadius.circular(10),
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 12),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
                 child: Center(
                   child: Text(
-                    'ОТПРАВИТЬ',
-                    style: TextStyle(
+                    _tr('ОТПРАВИТЬ', 'SEND'),
+                    style: const TextStyle(
                       color: Colors.black,
                       fontWeight: FontWeight.w800,
                     ),
@@ -2870,7 +3635,9 @@ class _ControlScreenState extends State<ControlScreen> {
             const SizedBox(width: 6),
             Expanded(
               child: _keyBtn(
-                  'Удалить', () => _send({'type': 'key', 'key': 'backspace'})),
+                _tr('Удалить', 'Delete'),
+                () => _send({'type': 'key', 'key': 'backspace'}),
+              ),
             ),
           ],
         ),
@@ -2911,7 +3678,7 @@ class _ControlScreenState extends State<ControlScreen> {
             const SizedBox(width: 8),
             Expanded(
               child: _keyBtn(
-                'Диспетчер',
+                _tr('Диспетчер', 'Task mgr'),
                 () => _sendHotkey(['ctrl', 'shift', 'esc']),
               ),
             ),
@@ -2924,12 +3691,16 @@ class _ControlScreenState extends State<ControlScreen> {
           children: [
             Expanded(
               child: _keyBtn(
-                  'Удалить', () => _send({'type': 'key', 'key': 'backspace'})),
+                _tr('Удалить', 'Delete'),
+                () => _send({'type': 'key', 'key': 'backspace'}),
+              ),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: _keyBtn(
-                  'Пробел', () => _send({'type': 'key', 'key': 'space'})),
+                _tr('Пробел', 'Space'),
+                () => _send({'type': 'key', 'key': 'space'}),
+              ),
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -3001,352 +3772,364 @@ class _ControlScreenState extends State<ControlScreen> {
               padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
               child: Column(
                 children: [
-                  _glassPanel(
-                    margin: EdgeInsets.zero,
-                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
-                    radius: BorderRadius.circular(14),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Row(
+                  AnimatedOpacity(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    opacity: _showKeyboard ? 0.94 : 1.0,
+                    child: AnimatedSlide(
+                      duration: const Duration(milliseconds: 260),
+                      curve: Curves.easeOutCubic,
+                      offset:
+                          _showKeyboard ? const Offset(0, -0.03) : Offset.zero,
+                      child: _glassPanel(
+                        margin: EdgeInsets.zero,
+                        padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+                        radius: BorderRadius.circular(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            _iconBtn(
-                              Icons.arrow_back,
-                              tooltip: 'Назад',
-                              compact: true,
-                              onTap: () => Navigator.pop(context),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Container(
-                                        width: 8,
-                                        height: 8,
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          color: _hudConnectionColor,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      Text(
-                                        _hudConnectionLabel,
-                                        style: TextStyle(
-                                          color: _hudConnectionColor,
-                                          fontWeight: FontWeight.w800,
-                                          letterSpacing: 0.28,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  if (!_showHudDetails) ...[
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      _streamDetailsLabel(),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        fontSize: 10,
-                                        color: Colors.white70,
-                                      ),
-                                    ),
-                                    if (_hudConnectionState ==
-                                            _HudConnectionState.degraded &&
-                                        _hudConnectionReason.isNotEmpty)
-                                      Text(
-                                        _hudConnectionReason,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                          fontSize: 10,
-                                          color: Colors.orangeAccent,
-                                        ),
-                                      ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                            if (_debugModeEnabled) ...[
-                              const SizedBox(width: 6),
-                              _iconBtn(
-                                Icons.bug_report,
-                                tooltip: 'Диагностика',
-                                color: Colors.lightBlueAccent,
-                                compact: true,
-                                onTap: _openDiagnostics,
-                              ),
-                            ],
-                            const SizedBox(width: 6),
-                            _iconBtn(
-                              _showHudDetails
-                                  ? Icons.keyboard_arrow_up
-                                  : Icons.tune,
-                              tooltip: _showHudDetails
-                                  ? 'Скрыть статистику потока'
-                                  : 'Показать статистику потока',
-                              active: _showHudDetails,
-                              compact: true,
-                              onTap: () => setState(
-                                () => _showHudDetails = !_showHudDetails,
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (_streamStatus.isNotEmpty ||
-                            _audioRelayStatus.isNotEmpty ||
-                            _showHudDetails ||
-                            _hudConnectionState !=
-                                _HudConnectionState.connected ||
-                            _activeUiError() != null) ...[
-                          const SizedBox(height: 8),
-                          if (_streamStatus.isNotEmpty)
-                            Text(
-                              _streamStatus,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: _statusTextColor(_streamStatus),
-                              ),
-                            ),
-                          if (_audioRelayStatus.isNotEmpty) ...[
-                            if (_streamStatus.isNotEmpty)
-                              const SizedBox(height: 4),
-                            Text(
-                              _audioRelayStatus,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: _statusTextColor(_audioRelayStatus),
-                              ),
-                            ),
-                          ],
-                          if (_showHudDetails ||
-                              _hudConnectionState !=
-                                  _HudConnectionState.connected) ...[
-                            if (_streamStatus.isNotEmpty ||
-                                _audioRelayStatus.isNotEmpty)
-                              const SizedBox(height: 8),
-                            _buildChannelStatusPanel(),
-                          ],
-                          _buildErrorActionCard(),
-                          if (_showHudDetails) ...[
-                            if (_streamStatus.isNotEmpty ||
-                                _audioRelayStatus.isNotEmpty ||
-                                _hudConnectionState !=
-                                    _HudConnectionState.connected)
-                              const SizedBox(height: 8),
-                            SingleChildScrollView(
-                              scrollDirection: Axis.horizontal,
-                              child: Row(
-                                children: [
-                                  _metricChip(
-                                    'FPS',
-                                    _streamFps.toStringAsFixed(0),
-                                    valueColor: _streamFps >= 24
-                                        ? kAccentColor
-                                        : Colors.amber,
-                                  ),
-                                  const SizedBox(width: 6),
-                                  _metricChip(
-                                    'RTT',
-                                    '${_currentRttMs.toStringAsFixed(0)} ms',
-                                  ),
-                                  const SizedBox(width: 6),
-                                  _metricChip(
-                                    'RATE',
-                                    '${_streamKbps.toStringAsFixed(0)} kbps',
-                                  ),
-                                  const SizedBox(width: 6),
-                                  _metricChip('DEC', '$_lastDecodeMs ms'),
-                                  if (_debugModeEnabled) ...[
-                                    const SizedBox(width: 6),
-                                    _metricChip('CPU', _cpu),
-                                  ],
-                                  if (_debugModeEnabled && _ram.isNotEmpty) ...[
-                                    const SizedBox(width: 6),
-                                    _metricChip('RAM', _ram),
-                                  ],
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 8),
                             Row(
                               children: [
                                 _iconBtn(
-                                  _pcMuted
-                                      ? Icons.volume_off
-                                      : Icons.volume_mute,
-                                  tooltip: _pcMuted
-                                      ? 'Включить звук на ПК'
-                                      : 'Выключить звук на ПК',
-                                  active: _pcMuted,
-                                  color: _pcMuted
-                                      ? Colors.redAccent
-                                      : Colors.white70,
+                                  Icons.arrow_back,
+                                  tooltip: _tr('Назад', 'Back'),
                                   compact: true,
-                                  onTap: _togglePcMute,
+                                  onTap: () => Navigator.pop(context),
                                 ),
                                 const SizedBox(width: 8),
                                 Expanded(
-                                  child: SliderTheme(
-                                    data: SliderTheme.of(context).copyWith(
-                                      trackHeight: 3,
-                                      thumbShape: const RoundSliderThumbShape(
-                                          enabledThumbRadius: 7),
-                                      overlayShape:
-                                          const RoundSliderOverlayShape(
-                                              overlayRadius: 12),
-                                    ),
-                                    child: Slider(
-                                      value: _pcVolumeUi.clamp(0, 100),
-                                      min: 0,
-                                      max: 100,
-                                      divisions: 100,
-                                      activeColor: kAccentColor,
-                                      inactiveColor: Colors.white24,
-                                      onChanged: _volumeBusy
-                                          ? null
-                                          : _onVolumeUiChanged,
-                                      onChangeEnd: (v) =>
-                                          unawaited(_applyPcVolume(v)),
-                                    ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Container(
+                                            width: 8,
+                                            height: 8,
+                                            decoration: BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              color: _hudConnectionColor,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Text(
+                                            _hudConnectionLabel,
+                                            style: TextStyle(
+                                              color: _hudConnectionColor,
+                                              fontWeight: FontWeight.w800,
+                                              letterSpacing: 0.28,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      if (!_showHudDetails) ...[
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          _streamDetailsLabel(),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 10,
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                        if (_hudConnectionState ==
+                                                _HudConnectionState.degraded &&
+                                            _hudConnectionReason.isNotEmpty)
+                                          Text(
+                                            _hudConnectionReason,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 10,
+                                              color: Colors.orangeAccent,
+                                            ),
+                                          ),
+                                      ],
+                                    ],
                                   ),
                                 ),
+                                if (_debugModeEnabled) ...[
+                                  const SizedBox(width: 6),
+                                  _iconBtn(
+                                    Icons.bug_report,
+                                    tooltip: _tr('Диагностика', 'Diagnostics'),
+                                    color: Colors.lightBlueAccent,
+                                    compact: true,
+                                    onTap: _openDiagnostics,
+                                  ),
+                                ],
                                 const SizedBox(width: 6),
-                                SizedBox(
-                                  width: 38,
-                                  child: Text(
-                                    '${_pcVolumeUi.round()}%',
-                                    textAlign: TextAlign.right,
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.white70,
-                                      fontWeight: FontWeight.w700,
-                                    ),
+                                _iconBtn(
+                                  _showHudDetails
+                                      ? Icons.keyboard_arrow_up
+                                      : Icons.tune,
+                                  tooltip: _showHudDetails
+                                      ? _tr(
+                                          'Скрыть статистику потока',
+                                          'Hide stream stats',
+                                        )
+                                      : _tr(
+                                          'Показать статистику потока',
+                                          'Show stream stats',
+                                        ),
+                                  active: _showHudDetails,
+                                  compact: true,
+                                  onTap: () => setState(
+                                    () => _showHudDetails = !_showHudDetails,
                                   ),
                                 ),
                               ],
                             ),
+                            if (_streamStatus.isNotEmpty ||
+                                _audioRelayStatus.isNotEmpty ||
+                                _showHudDetails ||
+                                _hudConnectionState !=
+                                    _HudConnectionState.connected ||
+                                _activeUiError() != null) ...[
+                              const SizedBox(height: 8),
+                              if (_streamStatus.isNotEmpty)
+                                Text(
+                                  _streamStatus,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: _statusTextColor(_streamStatus),
+                                  ),
+                                ),
+                              if (_audioRelayStatus.isNotEmpty) ...[
+                                if (_streamStatus.isNotEmpty)
+                                  const SizedBox(height: 4),
+                                Text(
+                                  _audioRelayStatus,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: _statusTextColor(_audioRelayStatus),
+                                  ),
+                                ),
+                              ],
+                              if (_showHudDetails ||
+                                  _hudConnectionState !=
+                                      _HudConnectionState.connected) ...[
+                                if (_streamStatus.isNotEmpty ||
+                                    _audioRelayStatus.isNotEmpty)
+                                  const SizedBox(height: 8),
+                                _buildChannelStatusPanel(),
+                              ],
+                              _buildErrorActionCard(),
+                              if (_showHudDetails) ...[
+                                if (_streamStatus.isNotEmpty ||
+                                    _audioRelayStatus.isNotEmpty ||
+                                    _hudConnectionState !=
+                                        _HudConnectionState.connected)
+                                  const SizedBox(height: 8),
+                                SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: Row(
+                                    children: [
+                                      _metricChip(
+                                        'FPS',
+                                        _streamFps.toStringAsFixed(0),
+                                        valueColor: _streamFps >= 24
+                                            ? kAccentColor
+                                            : Colors.amber,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      _metricChip(
+                                        'RTT',
+                                        '${_currentRttMs.toStringAsFixed(0)} ms',
+                                      ),
+                                      const SizedBox(width: 6),
+                                      _metricChip(
+                                        'RATE',
+                                        '${_streamKbps.toStringAsFixed(0)} kbps',
+                                      ),
+                                      const SizedBox(width: 6),
+                                      _metricChip('DEC', '$_lastDecodeMs ms'),
+                                      if (_debugModeEnabled) ...[
+                                        const SizedBox(width: 6),
+                                        _metricChip('CPU', _cpu),
+                                      ],
+                                      if (_debugModeEnabled &&
+                                          _ram.isNotEmpty) ...[
+                                        const SizedBox(width: 6),
+                                        _metricChip('RAM', _ram),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Row(
+                                  children: [
+                                    _iconBtn(
+                                      _pcMuted
+                                          ? Icons.volume_off
+                                          : Icons.volume_mute,
+                                      tooltip: _pcMuted
+                                          ? _tr(
+                                              'Включить звук на ПК',
+                                              'Unmute desktop audio',
+                                            )
+                                          : _tr(
+                                              'Выключить звук на ПК',
+                                              'Mute desktop audio',
+                                            ),
+                                      active: _pcMuted,
+                                      color: _pcMuted
+                                          ? Colors.redAccent
+                                          : Colors.white70,
+                                      compact: true,
+                                      onTap: () => unawaited(_togglePcMute()),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: SliderTheme(
+                                        data: SliderTheme.of(context).copyWith(
+                                          trackHeight: 3,
+                                          thumbShape:
+                                              const RoundSliderThumbShape(
+                                                  enabledThumbRadius: 7),
+                                          overlayShape:
+                                              const RoundSliderOverlayShape(
+                                                  overlayRadius: 12),
+                                        ),
+                                        child: Slider(
+                                          value: _pcVolumeUi.clamp(0, 100),
+                                          min: 0,
+                                          max: 100,
+                                          divisions: 100,
+                                          activeColor: kAccentColor,
+                                          inactiveColor: Colors.white24,
+                                          onChanged: _volumeBusy
+                                              ? null
+                                              : _onVolumeUiChanged,
+                                          onChangeEnd: (v) =>
+                                              unawaited(_applyPcVolume(v)),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    SizedBox(
+                                      width: 38,
+                                      child: Text(
+                                        _pcVolumeSupported
+                                            ? '${_pcVolumeUi.round()}%'
+                                            : '~${_pcVolumeUi.round()}%',
+                                        textAlign: TextAlign.right,
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.white70,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ],
                           ],
-                        ],
-                      ],
+                        ),
+                      ),
                     ),
                   ),
                   const Spacer(),
                   Align(
                     alignment: Alignment.bottomCenter,
-                    child: _glassPanel(
-                      margin: EdgeInsets.zero,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 6,
-                      ),
-                      radius: BorderRadius.circular(18),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _iconBtn(
-                            Icons.keyboard,
-                            tooltip:
-                                _showKeyboard ? 'Скрыть клавиши' : 'Клавиатура',
-                            active: _showKeyboard,
-                            color:
-                                _showKeyboard ? kAccentColor : Colors.white70,
-                            compact: true,
-                            onTap: () => setState(
-                              () => _showKeyboard = !_showKeyboard,
+                    child: AnimatedSlide(
+                      duration: const Duration(milliseconds: 260),
+                      curve: Curves.easeOutCubic,
+                      offset:
+                          _showKeyboard ? const Offset(0, -0.08) : Offset.zero,
+                      child: _glassPanel(
+                        margin: EdgeInsets.zero,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 6,
+                        ),
+                        radius: BorderRadius.circular(18),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _iconBtn(
+                              Icons.keyboard,
+                              tooltip: _showKeyboard
+                                  ? _tr('Скрыть клавиши', 'Hide keys')
+                                  : _tr('Клавиатура', 'Keyboard'),
+                              active: _showKeyboard,
+                              color:
+                                  _showKeyboard ? kAccentColor : Colors.white70,
+                              compact: true,
+                              onTap: () => setState(
+                                () => _showKeyboard = !_showKeyboard,
+                              ),
                             ),
-                          ),
-                          const SizedBox(width: 6),
-                          _iconBtn(
-                            Icons.rotate_right,
-                            tooltip: 'Повернуть поток',
-                            color: Colors.amber,
-                            compact: true,
-                            onTap: () =>
-                                setState(() => _rot = (_rot + 90) % 360),
-                          ),
-                          const SizedBox(width: 6),
-                          _iconBtn(
-                            _settings.streamAudio
-                                ? Icons.volume_up
-                                : Icons.volume_off,
-                            tooltip: _settings.streamAudio
-                                ? 'Звук потока: ВКЛ'
-                                : 'Звук потока: ВЫКЛ',
-                            active: _settings.streamAudio,
-                            color: _settings.streamAudio
-                                ? kAccentColor
-                                : Colors.orangeAccent,
-                            compact: true,
-                            onTap: () => unawaited(_toggleStreamAudio()),
-                          ),
-                          const SizedBox(width: 6),
-                          _iconBtn(
-                            Icons.network_check,
-                            tooltip:
-                                'Профиль сети: ${_networkProfileLabel(_activeNetworkProfile())}',
-                            active: _activeNetworkProfile() !=
-                                _NetworkProfile.stableWifi,
-                            color: _activeNetworkProfile() ==
-                                    _NetworkProfile.stableWifi
-                                ? Colors.white70
-                                : kAccentColor,
-                            compact: true,
-                            onTap: () => unawaited(_showNetworkProfileSheet()),
-                          ),
-                          const SizedBox(width: 6),
-                          _iconBtn(
-                            Icons.auto_fix_high,
-                            tooltip: _recoveryInProgress
-                                ? 'Автовосстановление выполняется...'
-                                : 'Автовосстановление',
-                            active: _recoveryInProgress,
-                            color: _recoveryInProgress
-                                ? Colors.orangeAccent
-                                : Colors.white70,
-                            compact: true,
-                            onTap: _recoveryInProgress
-                                ? () {}
-                                : () => unawaited(_runSmartRecovery()),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            width: 1,
-                            height: 20,
-                            color: Colors.white12,
-                          ),
-                          const SizedBox(width: 8),
-                          _iconBtn(
-                            Icons.mouse,
-                            tooltip: 'Режим тачпада',
-                            active: !_isTabletControlMode,
-                            color: !_isTabletControlMode
-                                ? kAccentColor
-                                : Colors.white70,
-                            compact: true,
-                            onTap: () => unawaited(_setControlMode('touchpad')),
-                          ),
-                          const SizedBox(width: 6),
-                          _iconBtn(
-                            Icons.touch_app,
-                            tooltip: 'Режим планшета',
-                            active: _isTabletControlMode,
-                            color: _isTabletControlMode
-                                ? kAccentColor
-                                : Colors.white70,
-                            compact: true,
-                            onTap: () => unawaited(_setControlMode('tablet')),
-                          ),
-                        ],
+                            const SizedBox(width: 6),
+                            _iconBtn(
+                              Icons.rotate_right,
+                              tooltip: _tr('Повернуть поток', 'Rotate stream'),
+                              color: Colors.amber,
+                              compact: true,
+                              onTap: () =>
+                                  setState(() => _rot = (_rot + 90) % 360),
+                            ),
+                            const SizedBox(width: 6),
+                            _iconBtn(
+                              _settings.streamAudio
+                                  ? Icons.volume_up
+                                  : Icons.volume_off,
+                              tooltip: _settings.streamAudio
+                                  ? _tr('Звук потока: ВКЛ', 'Stream audio: ON')
+                                  : _tr(
+                                      'Звук потока: ВЫКЛ', 'Stream audio: OFF'),
+                              active: _settings.streamAudio,
+                              color: _settings.streamAudio
+                                  ? kAccentColor
+                                  : Colors.orangeAccent,
+                              compact: true,
+                              onTap: () => unawaited(_toggleStreamAudio()),
+                            ),
+                            const SizedBox(width: 6),
+                            _iconBtn(
+                              Icons.network_check,
+                              tooltip:
+                                  '${_tr('Профиль сети', 'Network profile')}: ${_networkProfileLabel(_activeNetworkProfile())}',
+                              active: _activeNetworkProfile() !=
+                                  _NetworkProfile.stableWifi,
+                              color: _activeNetworkProfile() ==
+                                      _NetworkProfile.stableWifi
+                                  ? Colors.white70
+                                  : kAccentColor,
+                              compact: true,
+                              onTap: () =>
+                                  unawaited(_showNetworkProfileSheet()),
+                            ),
+                            const SizedBox(width: 6),
+                            _iconBtn(
+                              Icons.auto_fix_high,
+                              tooltip: _recoveryInProgress
+                                  ? _tr(
+                                      'Автовосстановление выполняется...',
+                                      'Auto-recovery is running...',
+                                    )
+                                  : _tr('Автовосстановление', 'Auto-recovery'),
+                              active: _recoveryInProgress,
+                              color: _recoveryInProgress
+                                  ? Colors.orangeAccent
+                                  : Colors.white70,
+                              compact: true,
+                              onTap: _recoveryInProgress
+                                  ? () {}
+                                  : () => unawaited(_runSmartRecovery()),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -3384,8 +4167,9 @@ class _ControlScreenState extends State<ControlScreen> {
                         Expanded(
                           child: Text(
                             _keyboardCompact
-                                ? 'Быстрая клавиатура'
-                                : 'Расширенная клавиатура',
+                                ? _tr('Быстрая клавиатура', 'Quick keyboard')
+                                : _tr('Расширенная клавиатура',
+                                    'Extended keyboard'),
                             style: TextStyle(
                               color: Colors.white.withValues(alpha: 0.72),
                               fontWeight: FontWeight.w700,
@@ -3398,8 +4182,8 @@ class _ControlScreenState extends State<ControlScreen> {
                               : Icons.unfold_less,
                           compact: true,
                           tooltip: _keyboardCompact
-                              ? 'Развернуть клавиатуру'
-                              : 'Свернуть клавиатуру',
+                              ? _tr('Развернуть клавиатуру', 'Expand keyboard')
+                              : _tr('Свернуть клавиатуру', 'Collapse keyboard'),
                           onTap: () => setState(
                               () => _keyboardCompact = !_keyboardCompact),
                         ),
@@ -3407,7 +4191,7 @@ class _ControlScreenState extends State<ControlScreen> {
                         _iconBtn(
                           Icons.close,
                           compact: true,
-                          tooltip: 'Скрыть клавиатуру',
+                          tooltip: _tr('Скрыть клавиатуру', 'Hide keyboard'),
                           color: Colors.redAccent,
                           onTap: () => setState(() => _showKeyboard = false),
                         ),
@@ -3476,14 +4260,30 @@ class _ControlScreenState extends State<ControlScreen> {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(radius),
-        child: Container(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
           width: size,
           height: size,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(radius),
             border: Border.all(color: borderColor),
           ),
-          child: Icon(icon, color: color, size: compact ? 18 : 21),
+          child: Center(
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 160),
+              switchInCurve: Curves.easeOutBack,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, anim) =>
+                  ScaleTransition(scale: anim, child: child),
+              child: Icon(
+                icon,
+                key: ValueKey<int>(icon.codePoint),
+                color: color,
+                size: compact ? 18 : 21,
+              ),
+            ),
+          ),
         ),
       ),
     );

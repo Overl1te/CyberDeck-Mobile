@@ -30,6 +30,11 @@ class _ErrorHelpScreenState extends State<ErrorHelpScreen> {
   List<ErrorArticle> _remote = <ErrorArticle>[];
   List<ErrorArticle> _items = <ErrorArticle>[];
 
+  bool get _isRuLocale =>
+      Localizations.localeOf(context).languageCode.toLowerCase() == 'ru';
+
+  String _tr(String ru, String en) => _isRuLocale ? ru : en;
+
   @override
   void initState() {
     super.initState();
@@ -206,7 +211,7 @@ class _ErrorHelpScreenState extends State<ErrorHelpScreen> {
       backgroundColor: kBgColor,
       appBar: AppBar(
         backgroundColor: kBgColor,
-        title: const Text('Error Guide'),
+        title: Text(_tr('Справочник ошибок', 'Error Guide')),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -217,7 +222,10 @@ class _ErrorHelpScreenState extends State<ErrorHelpScreen> {
               onChanged: (_) => _applyFilter(),
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
-                hintText: 'Search code, number, status, title, tags...',
+                hintText: _tr(
+                  'Поиск по коду, номеру, статусу, названию, тегам...',
+                  'Search code, number, status, title, tags...',
+                ),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.search),
                   onPressed: _applyFilter,
@@ -229,14 +237,14 @@ class _ErrorHelpScreenState extends State<ErrorHelpScreen> {
               children: <Widget>[
                 Expanded(
                   child: Text(
-                    'Found: ${_items.length}',
+                    _tr('Найдено: ${_items.length}', 'Found: ${_items.length}'),
                     style: const TextStyle(color: Colors.grey),
                   ),
                 ),
                 TextButton.icon(
                   onPressed: _loading ? null : _loadRemoteCatalog,
                   icon: const Icon(Icons.refresh),
-                  label: const Text('Refresh'),
+                  label: Text(_tr('Обновить', 'Refresh')),
                 ),
               ],
             ),
@@ -247,17 +255,20 @@ class _ErrorHelpScreenState extends State<ErrorHelpScreen> {
             if (_loadError.trim().isNotEmpty) ...<Widget>[
               const SizedBox(height: 8),
               Text(
-                'Remote catalog load failed: $_loadError',
+                _tr(
+                  'Не удалось загрузить удалённый каталог: $_loadError',
+                  'Remote catalog load failed: $_loadError',
+                ),
                 style: const TextStyle(color: kErrorColor),
               ),
             ],
             const SizedBox(height: 8),
             Expanded(
               child: _items.isEmpty
-                  ? const Center(
+                  ? Center(
                       child: Text(
-                        'No errors found',
-                        style: TextStyle(color: Colors.grey),
+                        _tr('Ошибки не найдены', 'No errors found'),
+                        style: const TextStyle(color: Colors.grey),
                       ),
                     )
                   : ListView.builder(
@@ -344,14 +355,21 @@ class _ErrorHelpScreenState extends State<ErrorHelpScreen> {
                                     ),
                                   )
                                 else
-                                  const Text(
-                                    'No detailed steps provided by server.',
-                                    style: TextStyle(color: Colors.white54),
+                                  Text(
+                                    _tr(
+                                      'Сервер не предоставил детальные шаги.',
+                                      'No detailed steps provided by server.',
+                                    ),
+                                    style:
+                                        const TextStyle(color: Colors.white54),
                                   ),
                                 if (item.tags.isNotEmpty) ...<Widget>[
                                   const SizedBox(height: 8),
                                   Text(
-                                    'Tags: ${item.tags.join(', ')}',
+                                    _tr(
+                                      'Теги: ${item.tags.join(', ')}',
+                                      'Tags: ${item.tags.join(', ')}',
+                                    ),
                                     style:
                                         const TextStyle(color: Colors.white54),
                                   ),

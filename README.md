@@ -4,7 +4,7 @@
 
 ![Flutter](https://img.shields.io/badge/Flutter-3.0%2B-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Dart-3.0%2B-0175C2?logo=dart)
-![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20iOS-lightgrey)
+![Platform](https://img.shields.io/badge/Platform-Android-lightgrey)
 ![License](https://img.shields.io/badge/license-GNU%20GPLv3-green)
 
 **Официальный мобильный клиент для системы удаленного управления CyberDeck**
@@ -93,6 +93,23 @@ flutter build apk --split-per-abi
 ```
 
 Файл будет находиться в: `build/app/outputs/flutter-apk/app-release.apk`
+
+---
+
+## Контрактные снапшоты (server -> mobile)
+
+Для проверки совместимости протокола с сервером CyberDeck:
+
+```powershell
+./tool/sync_server_contract_snapshots.ps1
+flutter test test/server_contract_snapshot_test.dart
+```
+
+Проверка без копирования (режим CI/валидации):
+
+```powershell
+./tool/sync_server_contract_snapshots.ps1 -Check
+```
 
 ---
 

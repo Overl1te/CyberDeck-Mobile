@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter_vlc_player/flutter_vlc_player.dart';
 
 class TsStreamView extends StatefulWidget {
@@ -52,6 +53,7 @@ class _TsStreamViewState extends State<TsStreamView> {
   int _lastPlaybackSignalAtMs = 0;
   bool _audioReadyReported = false;
   bool _audioUnavailableReported = false;
+  int _readinessProbeEpoch = 0;
 
   @override
   void initState() {
@@ -59,6 +61,7 @@ class _TsStreamViewState extends State<TsStreamView> {
     _controller = _createController(widget.streamUrl);
     _controller.addListener(_onControllerChanged);
     _armStartupTimeout();
+    _startReadinessProbe();
     _ensureAudioLevel();
   }
 
@@ -137,6 +140,7 @@ class _TsStreamViewState extends State<TsStreamView> {
     _controller = _createController(url);
     _controller.addListener(_onControllerChanged);
     _armStartupTimeout();
+    _startReadinessProbe();
     _ensureAudioLevel();
 
     if (mounted) setState(() {});
@@ -191,7 +195,7 @@ class _TsStreamViewState extends State<TsStreamView> {
     _audioPrimeTimer?.cancel();
     _audioPrimeAttempts = 0;
     _audioPrimeTimer =
-        Timer.periodic(const Duration(milliseconds: 420), (timer) {
+        Timer.periodic(const Duration(milliseconds: 260), (timer) {
       if (!mounted || !_isReady || _audioPrimed) {
         if (!mounted || _audioPrimed) {
           timer.cancel();
@@ -205,7 +209,7 @@ class _TsStreamViewState extends State<TsStreamView> {
           timer.cancel();
           return;
         }
-        if (_audioPrimeAttempts >= 20) {
+        if (_audioPrimeAttempts >= 10) {
           _markAudioUnavailable('audio track not detected');
           timer.cancel();
         }
@@ -233,6 +237,40 @@ class _TsStreamViewState extends State<TsStreamView> {
         _notifyFailure('timeout');
       }
     });
+  }
+
+  void _startReadinessProbe() {
+    final url = widget.streamUrl.trim();
+    if (url.isEmpty) return;
+    final epoch = ++_readinessProbeEpoch;
+    unawaited(_probeStreamReadiness(url, epoch: epoch));
+  }
+
+  Future<void> _probeStreamReadiness(String url, {required int epoch}) async {
+    final client = http.Client();
+    try {
+      final request = http.Request('HEAD', Uri.parse(url));
+      widget.headers.forEach((key, value) {
+        final k = key.trim();
+        final v = value.trim();
+        if (k.isEmpty || v.isEmpty) return;
+        request.headers[k] = v;
+      });
+      final response =
+          await client.send(request).timeout(widget.startupTimeout);
+      if (!mounted || epoch != _readinessProbeEpoch) return;
+      final status = response.statusCode;
+      if (status < 200 || status >= 300) {
+        _notifyFailure('http $status');
+        return;
+      }
+    } on TimeoutException {
+      // Keep the player alive and let the VLC/controller path complete naturally.
+    } catch (_) {
+      // Best effort probe: startup timeout and controller errors still drive fallback.
+    } finally {
+      client.close();
+    }
   }
 
   void _notifyFailure(String message) {
@@ -263,7 +301,10 @@ class _TsStreamViewState extends State<TsStreamView> {
       widget.onVideoSize?.call(sz);
     }
 
-    if (!_isReady && (value.isPlaying || (sz.width > 0 && sz.height > 0))) {
+    final positionMs = value.position.inMilliseconds;
+
+    if (!_isReady &&
+        (value.isPlaying || (sz.width > 0 && sz.height > 0) || positionMs > 0)) {
       _isReady = true;
       _startupTimer?.cancel();
       if (_lastError != null) {
@@ -275,7 +316,6 @@ class _TsStreamViewState extends State<TsStreamView> {
     }
 
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final positionMs = value.position.inMilliseconds;
     final positionAdvanced = positionMs > _lastPlaybackPositionMs;
     if (positionAdvanced) {
       _lastPlaybackPositionMs = positionMs;

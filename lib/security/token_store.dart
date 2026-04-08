@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -20,7 +21,11 @@ class TokenStore {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove(_legacyKey(deviceId));
       return;
-    } catch (_) {}
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[CyberDeck][TokenStore] secure write failed for $deviceId: $error\n$stackTrace',
+      );
+    }
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_legacyKey(deviceId), normalized);
@@ -32,7 +37,11 @@ class TokenStore {
       if (secureValue != null && secureValue.trim().isNotEmpty) {
         return secureValue.trim();
       }
-    } catch (_) {}
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[CyberDeck][TokenStore] secure read failed for $deviceId: $error\n$stackTrace',
+      );
+    }
 
     final prefs = await SharedPreferences.getInstance();
     final fallback = prefs.getString(_legacyKey(deviceId));
@@ -43,7 +52,11 @@ class TokenStore {
   static Future<void> deleteToken(String deviceId) async {
     try {
       await _secureStorage.delete(key: _secureKey(deviceId));
-    } catch (_) {}
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[CyberDeck][TokenStore] secure delete failed for $deviceId: $error\n$stackTrace',
+      );
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_legacyKey(deviceId));
   }

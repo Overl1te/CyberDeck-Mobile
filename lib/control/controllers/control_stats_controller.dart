@@ -10,16 +10,28 @@ class ControlStatsData {
   final String ram;
   final double rttMs;
   final String lastError;
+  final int? volumePercent;
+  final bool? volumeMuted;
+  final bool? volumeSupported;
 
   const ControlStatsData({
     required this.cpu,
     required this.ram,
     required this.rttMs,
     required this.lastError,
+    this.volumePercent,
+    this.volumeMuted,
+    this.volumeSupported,
   });
 
-  static const ControlStatsData initial =
-      ControlStatsData(cpu: '0%', ram: '', rttMs: 0, lastError: '');
+  static const ControlStatsData initial = ControlStatsData(
+      cpu: '0%',
+      ram: '',
+      rttMs: 0,
+      lastError: '',
+      volumePercent: null,
+      volumeMuted: null,
+      volumeSupported: null);
 }
 
 class ControlStatsController {
@@ -58,6 +70,9 @@ class ControlStatsController {
           ram: stats.value.ram,
           rttMs: rttMs,
           lastError: 'stats HTTP ${response.statusCode}',
+          volumePercent: stats.value.volumePercent,
+          volumeMuted: stats.value.volumeMuted,
+          volumeSupported: stats.value.volumeSupported,
         );
         return;
       }
@@ -69,6 +84,9 @@ class ControlStatsController {
           ram: stats.value.ram,
           rttMs: rttMs,
           lastError: 'stats invalid payload',
+          volumePercent: stats.value.volumePercent,
+          volumeMuted: stats.value.volumeMuted,
+          volumeSupported: stats.value.volumeSupported,
         );
         return;
       }
@@ -78,6 +96,9 @@ class ControlStatsController {
           decoded['memory'] ??
           decoded['mem'] ??
           decoded['ram_used'];
+      final volumePercent = _toInt(decoded['volume_percent']);
+      final volumeMuted = _toBool(decoded['volume_muted']);
+      final volumeSupported = _toBool(decoded['volume_supported']);
 
       var cpuLabel = stats.value.cpu;
       if (cpu != null) {
@@ -95,6 +116,9 @@ class ControlStatsController {
         ram: ramLabel,
         rttMs: rttMs,
         lastError: '',
+        volumePercent: volumePercent ?? stats.value.volumePercent,
+        volumeMuted: volumeMuted ?? stats.value.volumeMuted,
+        volumeSupported: volumeSupported ?? stats.value.volumeSupported,
       );
     } catch (e) {
       stats.value = ControlStatsData(
@@ -102,10 +126,40 @@ class ControlStatsController {
         ram: stats.value.ram,
         rttMs: sw.elapsedMilliseconds.toDouble(),
         lastError: e.toString(),
+        volumePercent: stats.value.volumePercent,
+        volumeMuted: stats.value.volumeMuted,
+        volumeSupported: stats.value.volumeSupported,
       );
     } finally {
       _inFlight = false;
     }
+  }
+
+  int? _toInt(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value.toString().trim());
+  }
+
+  bool? _toBool(dynamic value) {
+    if (value == null) return null;
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    final normalized = value.toString().trim().toLowerCase();
+    if (normalized == 'true' ||
+        normalized == 'yes' ||
+        normalized == 'on' ||
+        normalized == '1') {
+      return true;
+    }
+    if (normalized == 'false' ||
+        normalized == 'no' ||
+        normalized == 'off' ||
+        normalized == '0') {
+      return false;
+    }
+    return null;
   }
 
   void stop() {

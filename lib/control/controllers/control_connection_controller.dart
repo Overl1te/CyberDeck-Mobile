@@ -45,8 +45,12 @@ class ControlConnectionController {
   final Map<String, _PendingControlEvent> _pendingControlEvents =
       <String, _PendingControlEvent>{};
 
-  static const int _ackRetryIntervalMs = 260;
-  static const int _ackMaxAttempts = 4;
+  static const int _ackRetryPollMs = 120;
+  static const int _ackRetryIntervalMinMs = 260;
+  static const int _ackRetryIntervalMaxMs = 1400;
+  static const int _ackMaxAttemptsBase = 6;
+  static const int _ackMaxAttemptsHighLatency = 10;
+  static const int _pendingControlQueueLimit = 48;
 
   ControlConnectionController({
     required this.endpoint,
@@ -84,8 +88,8 @@ class ControlConnectionController {
           ),
         ),
       ],
-      baseBackoff: const Duration(milliseconds: 600),
-      maxBackoff: const Duration(seconds: 12),
+      baseBackoff: const Duration(milliseconds: 350),
+      maxBackoff: const Duration(seconds: 8),
       rotateEndpointsOnFailure: true,
       backoffJitterRatio: 0.25,
     );
@@ -96,12 +100,12 @@ class ControlConnectionController {
   }
 
   void send(Map<String, dynamic> payload) {
-    if (!isConnected.value) return;
     final normalized = _normalizeOutgoingPayload(payload);
     if (_requiresAck(normalized)) {
-      _sendWithAck(normalized);
+      _enqueueAckPacket(normalized, sendNow: isConnected.value);
       return;
     }
+    if (!isConnected.value) return;
     _sendRaw(normalized);
   }
 
@@ -137,6 +141,7 @@ class ControlConnectionController {
       _startClientHeartbeat();
       _startAckRetryLoop();
       _resetWatchdog();
+      _flushPendingControlEvents();
 
       if (!legacyMode) {
         _sendRaw(<String, dynamic>{
@@ -167,7 +172,6 @@ class ControlConnectionController {
       _clientHeartbeatTimer = null;
       _ackRetryTimer?.cancel();
       _ackRetryTimer = null;
-      _pendingControlEvents.clear();
       return;
     }
   }
@@ -319,25 +323,49 @@ class ControlConnectionController {
     return 'e${now}_$_eventSeq';
   }
 
-  void _sendWithAck(Map<String, dynamic> payload) {
+  void _enqueueAckPacket(
+    Map<String, dynamic> payload, {
+    required bool sendNow,
+  }) {
+    if (_pendingControlEvents.length >= _pendingControlQueueLimit) {
+      final oldestId =
+          _pendingControlEvents.isEmpty ? null : _pendingControlEvents.keys.first;
+      if (oldestId != null) {
+        _pendingControlEvents.remove(oldestId);
+      }
+    }
     final eventId = _nextEventId();
     final now = DateTime.now().millisecondsSinceEpoch;
     final packet = Map<String, dynamic>.from(payload)..['event_id'] = eventId;
     _pendingControlEvents[eventId] = _PendingControlEvent(
       payload: packet,
-      lastSentAtMs: now,
-      attempts: 1,
+      lastSentAtMs: sendNow ? now : 0,
+      attempts: sendNow ? 1 : 0,
       type: (payload['type'] ?? '').toString(),
     );
-    _sendRaw(packet);
+    if (sendNow) {
+      _sendRaw(packet);
+    }
     _startAckRetryLoop();
+  }
+
+  void _flushPendingControlEvents() {
+    if (_disposed || !isConnected.value || _pendingControlEvents.isEmpty) {
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final pending in _pendingControlEvents.values) {
+      pending.attempts += 1;
+      pending.lastSentAtMs = now;
+      _sendRaw(pending.payload);
+    }
   }
 
   void _startAckRetryLoop() {
     if (_ackRetryTimer != null) return;
     if (_disposed || !isConnected.value) return;
     _ackRetryTimer = Timer.periodic(
-      const Duration(milliseconds: _ackRetryIntervalMs),
+      const Duration(milliseconds: _ackRetryPollMs),
       (_) {
         if (_disposed || !isConnected.value) return;
         if (_pendingControlEvents.isEmpty) {
@@ -348,10 +376,11 @@ class ControlConnectionController {
         final now = DateTime.now().millisecondsSinceEpoch;
         final toDrop = <String>[];
         _pendingControlEvents.forEach((id, pending) {
-          if ((now - pending.lastSentAtMs) < _ackRetryIntervalMs) {
+          final retryIntervalMs = _ackRetryIntervalForCurrentNetworkMs();
+          if ((now - pending.lastSentAtMs) < retryIntervalMs) {
             return;
           }
-          if (pending.attempts >= _ackMaxAttempts) {
+          if (pending.attempts >= _ackMaxAttemptsForCurrentNetwork()) {
             toDrop.add(id);
             return;
           }
@@ -367,6 +396,21 @@ class ControlConnectionController {
         }
       },
     );
+  }
+
+  int _ackRetryIntervalForCurrentNetworkMs() {
+    final currentRtt = rttMs.value;
+    if (currentRtt <= 0) return _ackRetryIntervalMinMs;
+    final scaled = (currentRtt * 1.3).round();
+    return scaled.clamp(_ackRetryIntervalMinMs, _ackRetryIntervalMaxMs);
+  }
+
+  int _ackMaxAttemptsForCurrentNetwork() {
+    final currentRtt = rttMs.value;
+    if (currentRtt >= 250) {
+      return _ackMaxAttemptsHighLatency;
+    }
+    return _ackMaxAttemptsBase;
   }
 
   void _handleAck(Map<String, dynamic> payload) {

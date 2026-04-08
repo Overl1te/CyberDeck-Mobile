@@ -48,11 +48,19 @@ class _CyberDeckAppState extends State<CyberDeckApp> {
       if (initialUri != null) {
         _openFromDeepLink(initialUri.toString());
       }
-    } catch (_) {}
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[CyberDeck][DeepLink] failed to read initial link: $error\n$stackTrace',
+      );
+    }
 
     _deepLinkSubscription = appLinks.uriLinkStream.listen(
       (uri) => _openFromDeepLink(uri.toString()),
-      onError: (_) {},
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint(
+          '[CyberDeck][DeepLink] runtime link stream error: $error\n$stackTrace',
+        );
+      },
     );
   }
 

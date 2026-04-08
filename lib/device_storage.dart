@@ -232,8 +232,6 @@ class DeviceSettings {
       );
 
   static String _normalizeControlMode(String? raw) {
-    final value = (raw ?? '').trim().toLowerCase();
-    if (value == 'tablet') return 'tablet';
     return 'touchpad';
   }
 

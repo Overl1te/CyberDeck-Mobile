@@ -35,6 +35,10 @@ jobs:
       - name: Flutter Analyze
         run: flutter analyze
 
+      - name: Check contract snapshots (optional sibling repo)
+        shell: pwsh
+        run: ./tool/sync_server_contract_snapshots.ps1 -Check
+
       - name: Flutter Test
         if: ${{ hashFiles('test/**/*_test.dart') != '' }}
         run: flutter test

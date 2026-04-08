@@ -6,6 +6,12 @@ import 'package:flutter/services.dart';
 class DiagnosticsSnapshot {
   final String activeCandidate;
   final String backend;
+  final String endpoint;
+  final String effectiveOrigin;
+  final String accessMode;
+  final String sessionStatus;
+  final String wsStatus;
+  final String audioPath;
   final double fps;
   final int decodeMs;
   final double rttMs;
@@ -22,6 +28,12 @@ class DiagnosticsSnapshot {
   const DiagnosticsSnapshot({
     required this.activeCandidate,
     required this.backend,
+    required this.endpoint,
+    required this.effectiveOrigin,
+    required this.accessMode,
+    required this.sessionStatus,
+    required this.wsStatus,
+    required this.audioPath,
     required this.fps,
     required this.decodeMs,
     required this.rttMs,
@@ -231,6 +243,20 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
                   s.audioStatus.isEmpty ? 'нет' : s.audioStatus),
               _row('Последняя ошибка',
                   s.lastError.isEmpty ? 'нет' : s.lastError),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        _sectionCard(
+          title: 'Доступ и сессия',
+          child: Column(
+            children: [
+              _row('Endpoint', s.endpoint),
+              _row('Origin', s.effectiveOrigin),
+              _row('Режим', s.accessMode),
+              _row('Session', s.sessionStatus),
+              _row('WS runtime', s.wsStatus),
+              _row('Audio path', s.audioPath),
             ],
           ),
         ),

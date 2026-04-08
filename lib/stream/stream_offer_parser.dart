@@ -163,11 +163,11 @@ class StreamAdaptiveHint {
         minWidthFloor: minWidthFloor,
         maxWidthCeiling: baseMaxWidth,
       ),
-      minSwitchIntervalMs: 10000,
-      hysteresisRatio: 0.12,
+      minSwitchIntervalMs: 18000,
+      hysteresisRatio: 0.16,
       minWidthFloor: minWidthFloor,
-      downgradeSustainMs: 4500,
-      upgradeSustainMs: 8000,
+      downgradeSustainMs: 7000,
+      upgradeSustainMs: 14000,
       preferQualityBeforeResize: false,
     );
   }
@@ -183,6 +183,7 @@ class StreamAdaptiveHint {
 
 class ParsedStreamOffer {
   final List<ParsedStreamCandidate> candidates;
+  final Uri? audioRelayUri;
   final StreamFallbackPolicy fallbackPolicy;
   final StreamAdaptiveHint adaptiveHint;
   final int reconnectHintMs;
@@ -194,6 +195,7 @@ class ParsedStreamOffer {
 
   const ParsedStreamOffer({
     required this.candidates,
+    required this.audioRelayUri,
     required this.fallbackPolicy,
     required this.adaptiveHint,
     required this.reconnectHintMs,
@@ -223,6 +225,7 @@ ParsedStreamOffer parseStreamOffer(
   if (payload is! Map) {
     return ParsedStreamOffer(
       candidates: const <ParsedStreamCandidate>[],
+      audioRelayUri: null,
       fallbackPolicy: const StreamFallbackPolicy(
         candidateTimeoutMs: 2800,
         stallSeconds: 8,
@@ -254,6 +257,12 @@ ParsedStreamOffer parseStreamOffer(
     fps: fps,
     defaultBackend: backend,
   );
+  final audioRelayUri = _parseAudioRelayUri(
+    data,
+    resolveCandidateUri: resolveCandidateUri,
+    token: token,
+    includeAuthQueryToken: includeAuthQueryToken,
+  );
 
   final fallbackPolicy = _parseFallbackPolicy(data);
   final adaptiveHint = _parseAdaptiveHint(
@@ -266,6 +275,7 @@ ParsedStreamOffer parseStreamOffer(
 
   return ParsedStreamOffer(
     candidates: parsedCandidates,
+    audioRelayUri: audioRelayUri,
     fallbackPolicy: fallbackPolicy,
     adaptiveHint: adaptiveHint,
     reconnectHintMs:
@@ -472,18 +482,18 @@ StreamAdaptiveHint _parseAdaptiveHint(
   final minSwitchIntervalMs = (_toInt(map['min_switch_interval_ms']) ??
           _toInt(map['min_switch_interval']) ??
           fallback.minSwitchIntervalMs)
-      .clamp(1500, 120000);
+      .clamp(6000, 120000);
   final hysteresisRatio =
       (_toDouble(map['hysteresis_ratio']) ?? fallback.hysteresisRatio)
-          .clamp(0.05, 0.5);
+          .clamp(0.08, 0.5);
   final downgradeSustainMs = (_toInt(map['downgrade_sustain_ms']) ??
           _toInt(map['downgrade_window_ms']) ??
           fallback.downgradeSustainMs)
-      .clamp(1500, 10000);
+      .clamp(5000, 15000);
   final upgradeSustainMs = (_toInt(map['upgrade_sustain_ms']) ??
           _toInt(map['upgrade_window_ms']) ??
           fallback.upgradeSustainMs)
-      .clamp(3000, 20000);
+      .clamp(10000, 30000);
   final preferQualityBeforeResize =
       _toBool(map['prefer_quality_before_resize']) ??
           _toBool(map['prefer_quality']) ??
@@ -528,6 +538,11 @@ ParsedStreamCandidate? _parseOne(
   required int fps,
   required String defaultBackend,
 }) {
+  final mediaKind = _toNonEmptyString(
+    raw['kind'] ?? raw['media'] ?? raw['track_type'] ?? raw['track'],
+  )?.toLowerCase();
+  if (mediaKind == 'audio') return null;
+
   final mime = (raw['mime'] ??
           raw['content_type'] ??
           raw['contentType'] ??
@@ -536,6 +551,13 @@ ParsedStreamCandidate? _parseOne(
       .toString()
       .trim()
       .toLowerCase();
+  if (mime.startsWith('audio/')) return null;
+
+  final candidateId = _toNonEmptyString(raw['id'])?.toLowerCase() ?? '';
+  if (candidateId.startsWith('audio') &&
+      (mime.contains('mp2t') || mime.contains('mpegts'))) {
+    return null;
+  }
   final transport = _transportFromMime(mime);
   if (transport == null) return null;
 
@@ -568,10 +590,87 @@ ParsedStreamCandidate? _parseOne(
   );
 }
 
+Uri? _parseAudioRelayUri(
+  Map<String, dynamic> payload, {
+  required Uri Function(String raw) resolveCandidateUri,
+  required String token,
+  required bool includeAuthQueryToken,
+}) {
+  final audioRaw = payload['audio'];
+  if (audioRaw is Map) {
+    final audio = _normalizeMap(audioRaw);
+    final separateUrl = _toNonEmptyString(
+      audio['separate_url'] ?? audio['url'] ?? audio['uri'] ?? audio['src'],
+    );
+    if (separateUrl != null) {
+      final resolved = resolveCandidateUri(separateUrl);
+      return _augmentAuthUri(
+        resolved,
+        token: token,
+        includeAuthQueryToken: includeAuthQueryToken,
+      );
+    }
+  }
+
+  final rawCandidates = payload['candidates'];
+  if (rawCandidates is! List) return null;
+  for (final raw in rawCandidates) {
+    if (raw is! Map) continue;
+    final normalized = _normalizeMap(raw);
+    final mediaKind = _toNonEmptyString(
+      normalized['kind'] ??
+          normalized['media'] ??
+          normalized['track_type'] ??
+          normalized['track'],
+    )?.toLowerCase();
+    final mime = _toNonEmptyString(
+          normalized['mime'] ??
+              normalized['content_type'] ??
+              normalized['contentType'] ??
+              normalized['type'],
+        )?.toLowerCase() ??
+        '';
+    final candidateId =
+        _toNonEmptyString(normalized['id'])?.toLowerCase() ?? '';
+    final looksAudioRelay = mediaKind == 'audio' ||
+        mime.startsWith('audio/') ||
+        (candidateId.startsWith('audio') &&
+            (mime.contains('mp2t') || mime.contains('mpegts')));
+    if (!looksAudioRelay) continue;
+    final urlRaw = _toNonEmptyString(
+      normalized['url'] ??
+          normalized['uri'] ??
+          normalized['src'] ??
+          normalized['path'] ??
+          normalized['endpoint'],
+    );
+    if (urlRaw == null) continue;
+    final resolved = resolveCandidateUri(urlRaw);
+    return _augmentAuthUri(
+      resolved,
+      token: token,
+      includeAuthQueryToken: includeAuthQueryToken,
+    );
+  }
+  return null;
+}
+
 String? _transportFromMime(String mime) {
   if (mime.startsWith('video/mp2t')) return 'mpegTs';
   if (mime.startsWith('multipart/x-mixed-replace')) return 'mjpeg';
   return null;
+}
+
+Uri _augmentAuthUri(
+  Uri uri, {
+  required String token,
+  required bool includeAuthQueryToken,
+}) {
+  final query = Map<String, String>.from(uri.queryParameters);
+  if (includeAuthQueryToken && token.trim().isNotEmpty) {
+    query['token'] = token;
+  }
+  return uri.replace(queryParameters: query);
 }
 
 Uri _augmentCandidateUri(
@@ -584,12 +683,12 @@ Uri _augmentCandidateUri(
   required int fps,
   required bool includeMjpegParams,
 }) {
-  final query = Map<String, String>.from(uri.queryParameters);
-  if (includeAuthQueryToken && token.trim().isNotEmpty) {
-    query['token'] = token;
-  } else {
-    query.remove('token');
-  }
+  final base = _augmentAuthUri(
+    uri,
+    token: token,
+    includeAuthQueryToken: includeAuthQueryToken,
+  );
+  final query = Map<String, String>.from(base.queryParameters);
   query['low_latency'] = lowLatency ? '1' : '0';
   query['max_w'] = maxWidth.toString();
   if (includeMjpegParams) {
@@ -597,7 +696,7 @@ Uri _augmentCandidateUri(
     query['fps'] = fps.toString();
     query.putIfAbsent('cursor', () => '0');
   }
-  return uri.replace(queryParameters: query);
+  return base.replace(queryParameters: query);
 }
 
 Map<String, dynamic> _normalizeMap(Map raw) {

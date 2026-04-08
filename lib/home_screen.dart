@@ -22,6 +22,23 @@ class _HomeScreenState extends State<HomeScreen> {
   List<SavedDevice> _devices = [];
   bool _vpnWarningShown = false;
   static const String _vpnWarningIgnoredKey = 'vpn_warning_ignored';
+  static const List<String> _vpnIfaceHints = <String>[
+    'vpn',
+    'tun',
+    'tap',
+    'wireguard',
+    'wg',
+    'tailscale',
+    'zerotier',
+    'hamachi',
+    'nordlynx',
+    'proton',
+    'wintun',
+    'utun',
+    'ipsec',
+    'ppp',
+    'warp',
+  ];
 
   AppLocalizations get _l10n => AppLocalizations.of(context)!;
 
@@ -92,12 +109,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       for (final iface in interfaces) {
         final name = iface.name.toLowerCase();
-        if (name.contains('vpn') ||
-            name.contains('tun') ||
-            name.contains('tap') ||
-            name.contains('ppp') ||
-            name.contains('ipsec') ||
-            name.contains('utun')) {
+        if (_vpnIfaceHints.any(name.contains)) {
           return true;
         }
       }

@@ -91,9 +91,9 @@ class UpdateCheckService {
     try {
       final response = await _client.get(
         Uri.parse(apiUrl),
-        headers: const <String, String>{
+        headers: <String, String>{
           'Accept': 'application/vnd.github+json',
-          'User-Agent': 'CyberDeck-Mobile/1.1.1',
+          'User-Agent': 'CyberDeck-Mobile/$kMobileAppVersion',
         },
       ).timeout(timeout);
       if (response.statusCode != 200) {

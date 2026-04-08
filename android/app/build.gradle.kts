@@ -5,8 +5,21 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseKeyStoreFile: String? =
+    System.getenv("CYBERDECK_UPLOAD_STORE_FILE")
+        ?: (project.findProperty("CYBERDECK_UPLOAD_STORE_FILE") as String?)
+val releaseKeyStorePassword: String? =
+    System.getenv("CYBERDECK_UPLOAD_STORE_PASSWORD")
+        ?: (project.findProperty("CYBERDECK_UPLOAD_STORE_PASSWORD") as String?)
+val releaseKeyAlias: String? =
+    System.getenv("CYBERDECK_UPLOAD_KEY_ALIAS")
+        ?: (project.findProperty("CYBERDECK_UPLOAD_KEY_ALIAS") as String?)
+val releaseKeyPassword: String? =
+    System.getenv("CYBERDECK_UPLOAD_KEY_PASSWORD")
+        ?: (project.findProperty("CYBERDECK_UPLOAD_KEY_PASSWORD") as String?)
+
 android {
-    namespace = "com.example.cyberdeck_mobile.cyberdeck_mobile"
+    namespace = "com.overl1te.cyberdeckmobile"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -20,11 +33,24 @@ android {
         jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
+    signingConfigs {
+        create("release") {
+            if (
+                !releaseKeyStoreFile.isNullOrBlank() &&
+                !releaseKeyStorePassword.isNullOrBlank() &&
+                !releaseKeyAlias.isNullOrBlank() &&
+                !releaseKeyPassword.isNullOrBlank()
+            ) {
+                storeFile = file(releaseKeyStoreFile)
+                storePassword = releaseKeyStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.cyberdeck_mobile.cyberdeck_mobile"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        applicationId = "com.overl1te.cyberdeckmobile"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -33,9 +59,14 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Uses release keystore from env/properties when provided.
+            // Falls back to debug key for local smoke builds.
+            val releaseConfig = signingConfigs.findByName("release")
+            signingConfig = if (releaseConfig != null && releaseConfig.storeFile != null) {
+                releaseConfig
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
 
         debug {

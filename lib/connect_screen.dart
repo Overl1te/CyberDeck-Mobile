@@ -85,8 +85,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
   }
 
   String _normalizeScheme(String? raw) {
-    final value = (raw ?? '').trim().toLowerCase();
-    return value == 'https' ? 'https' : 'http';
+    return normalizeEndpointScheme(raw);
   }
 
   String _deviceId({
@@ -286,7 +285,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
   }) async {
     final ipInput = (manualIp ?? _ipController.text).trim();
     final code = (manualCode ?? _codeController.text).trim();
-    final scheme = _normalizeScheme(manualScheme);
+    final scheme = _normalizeScheme(
+      (manualScheme != null && manualScheme.trim().isNotEmpty)
+          ? manualScheme
+          : ipInput,
+    );
     if (ipInput.isEmpty || code.isEmpty) {
       _showError(_l10n.enterIpAndCode);
       return;

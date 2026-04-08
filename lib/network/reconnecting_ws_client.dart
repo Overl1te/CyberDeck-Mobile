@@ -43,6 +43,7 @@ class ReconnectingWsClient {
   int _attempt = 0;
   int _endpointIndex = 0;
   int _reconnectCount = 0;
+  int _connectGeneration = 0;
   WsConnectionState _state = WsConnectionState.disconnected;
 
   ReconnectingWsClient({
@@ -109,33 +110,71 @@ class ReconnectingWsClient {
     _setState(nextState);
 
     final endpoint = endpoints[_endpointIndex];
+    final generation = ++_connectGeneration;
     IOWebSocketChannel channel;
     try {
       channel = IOWebSocketChannel.connect(
         endpoint.uri.toString(),
         headers: endpoint.headers.isEmpty ? null : endpoint.headers,
       );
-    } catch (_) {
+    } catch (error, stackTrace) {
+      developer.log(
+        'ws connect failed: ${endpoint.uri} error=$error',
+        name: 'CyberDeck.WS',
+        error: error,
+        stackTrace: stackTrace,
+      );
       _scheduleReconnect();
       return;
     }
 
     _channel = channel;
-    _setState(WsConnectionState.connected);
-    developer.log(
-      'ws connected: ${endpoint.uri}',
-      name: 'CyberDeck.WS',
-    );
 
     _subscription = channel.stream.listen(
       (message) {
-        _attempt = 0;
         _messageController.add(message);
       },
       onDone: _handleDisconnect,
-      onError: (_) => _handleDisconnect(),
+      onError: (Object error, StackTrace stackTrace) {
+        developer.log(
+          'ws stream error: ${endpoint.uri} error=$error',
+          name: 'CyberDeck.WS',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        _handleDisconnect();
+      },
       cancelOnError: true,
     );
+
+    Future<void>(() async {
+      try {
+        await channel.ready;
+      } catch (error, stackTrace) {
+        developer.log(
+          'ws ready failed: ${endpoint.uri} error=$error',
+          name: 'CyberDeck.WS',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        if (_disposed || _manualClose) return;
+        if (!identical(_channel, channel) || generation != _connectGeneration) {
+          return;
+        }
+        _handleDisconnect();
+        return;
+      }
+      if (_disposed || _manualClose) return;
+      if (!identical(_channel, channel) || generation != _connectGeneration) {
+        return;
+      }
+      _attempt = 0;
+      _setState(WsConnectionState.connected);
+      developer.log(
+        'ws connected: ${endpoint.uri}',
+        name: 'CyberDeck.WS',
+      );
+    });
   }
 
   void _handleDisconnect() {
