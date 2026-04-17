@@ -152,7 +152,7 @@ class DeviceSettings {
         streamFps: 60,
         showCursor: true,
         lowLatency: false,
-        streamAudio: true,
+        streamAudio: false,
         controlMode: 'touchpad',
         networkProfile: 'stable_wifi',
       );
@@ -225,7 +225,7 @@ class DeviceSettings {
         streamFps: (json['streamFps'] as num?)?.toInt() ?? 60,
         showCursor: json['showCursor'] as bool? ?? true,
         lowLatency: json['lowLatency'] as bool? ?? false,
-        streamAudio: json['streamAudio'] as bool? ?? true,
+        streamAudio: false,
         controlMode: _normalizeControlMode(json['controlMode']?.toString()),
         networkProfile:
             _normalizeNetworkProfile(json['networkProfile']?.toString()),

@@ -82,7 +82,7 @@ bool shouldPreferCompatibleRelayTransport(String? host) {
 bool shouldRestrictToCompatibleRelayTransport(String? host) {
   final normalized = (host ?? '').trim().toLowerCase();
   if (normalized.isEmpty) return false;
-  return normalized.endsWith('.trycloudflare.com');
+  return shouldPreferCompatibleRelayTransport(normalized);
 }
 
 Uri resolveUriAgainstEndpoint(

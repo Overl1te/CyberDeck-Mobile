@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:math';
-
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_vlc_player/flutter_vlc_player.dart';
@@ -167,7 +165,7 @@ class _AudioRelayViewState extends State<AudioRelayView> {
   Future<void> _probeStreamReadiness(String url, {required int epoch}) async {
     final client = http.Client();
     try {
-      final request = http.Request('GET', Uri.parse(url));
+      final request = http.Request('HEAD', Uri.parse(url));
       widget.headers.forEach((key, value) {
         final k = key.trim();
         final v = value.trim();
@@ -182,11 +180,6 @@ class _AudioRelayViewState extends State<AudioRelayView> {
         _notifyFailure('http $status');
         return;
       }
-      await response.stream.first.timeout(
-        Duration(
-          milliseconds: max(800, widget.startupTimeout.inMilliseconds ~/ 2),
-        ),
-      );
       if (epoch != _controllerEpoch || !mounted) return;
       _markReady();
     } on TimeoutException {

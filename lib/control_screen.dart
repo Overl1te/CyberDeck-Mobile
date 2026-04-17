@@ -308,6 +308,21 @@ class _ControlScreenState extends State<ControlScreen> {
     await streamResolve;
   }
 
+  _StreamCandidate _provisionalLegacyCandidate() {
+    final params = _effectiveStreamParams;
+    return _StreamCandidate(
+      uri: _legacyMjpegUri(
+        maxWidth: params.maxWidth,
+        quality: params.quality,
+        fps: params.fps,
+      ),
+      mime: 'multipart/x-mixed-replace; boundary=frame',
+      transport: _StreamTransport.mjpeg,
+      backend: 'legacy_mjpeg',
+      signature: 'mjpeg|/video_feed|legacy',
+    );
+  }
+
   Future<void> _loadSettings() async {
     final s = await DeviceStorage.getDeviceSettings(widget.deviceId);
     final appSettings = await DeviceStorage.getAppSettings();
@@ -1049,7 +1064,21 @@ class _ControlScreenState extends State<ControlScreen> {
     return _NetworkProfileExt.fromStorage(_settings.networkProfile);
   }
 
+  bool get _usesCompatibilityRelayTransport {
+    return shouldPreferCompatibleRelayTransport(_endpoint.host);
+  }
+
+  _AdaptiveStreamParams get _effectiveStreamParams {
+    if (!_usesCompatibilityRelayTransport) return _adaptiveParams;
+    return _AdaptiveStreamParams(
+      maxWidth: min(_adaptiveParams.maxWidth, 1280),
+      quality: min(_adaptiveParams.quality, 56),
+      fps: min(_adaptiveParams.fps, 30),
+    );
+  }
+
   bool get _effectiveLowLatency {
+    if (_usesCompatibilityRelayTransport) return true;
     if (_settings.lowLatency) return true;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     return nowMs < _feedbackLowLatencyUntilMs;
@@ -1715,74 +1744,24 @@ class _ControlScreenState extends State<ControlScreen> {
 
   List<_StreamCandidate> _prioritizeCandidates(List<_StreamCandidate> input) {
     if (input.length < 2) return input;
-    final preferCompatibilityRelay =
-        shouldPreferCompatibleRelayTransport(_endpoint.host);
 
-    final withFailures = List<_StreamCandidate>.from(input)
+    final indexed = input.asMap().entries.toList(growable: false)
       ..sort((a, b) {
-        final fa = _candidateFailureCount[a.signature] ?? 0;
-        final fb = _candidateFailureCount[b.signature] ?? 0;
+        final fa = _candidateFailureCount[a.value.signature] ?? 0;
+        final fb = _candidateFailureCount[b.value.signature] ?? 0;
         if (fa != fb) return fa.compareTo(fb);
-        final ta = preferCompatibilityRelay
-            ? (a.transport == _StreamTransport.mjpeg ? 0 : 1)
-            : (a.transport == _StreamTransport.mpegTs ? 0 : 1);
-        final tb = preferCompatibilityRelay
-            ? (b.transport == _StreamTransport.mjpeg ? 0 : 1)
-            : (b.transport == _StreamTransport.mpegTs ? 0 : 1);
-        return ta.compareTo(tb);
+        final ta = a.value.transport == _StreamTransport.mjpeg ? 0 : 1;
+        final tb = b.value.transport == _StreamTransport.mjpeg ? 0 : 1;
+        if (ta != tb) return ta.compareTo(tb);
+        return a.key.compareTo(b.key);
       });
-
-    if (preferCompatibilityRelay) {
-      final firstHealthyMjpeg = withFailures.firstWhere(
-        (c) =>
-            c.transport == _StreamTransport.mjpeg &&
-            (_candidateFailureCount[c.signature] ?? 0) < 3,
-        orElse: () => withFailures.first,
-      );
-      if (firstHealthyMjpeg.transport == _StreamTransport.mjpeg &&
-          withFailures.first.signature != firstHealthyMjpeg.signature) {
-        final out = <_StreamCandidate>[firstHealthyMjpeg];
-        for (final c in withFailures) {
-          if (c.signature == firstHealthyMjpeg.signature) continue;
-          out.add(c);
-        }
-        _log(
-          'prefer compatibility relay candidate first: ${firstHealthyMjpeg.signature}',
-        );
-        return out;
-      }
-    }
-
-    final hasHealthyMpegTs = withFailures.any(
-      (c) =>
-          c.transport == _StreamTransport.mpegTs &&
-          (_candidateFailureCount[c.signature] ?? 0) < 2,
-    );
-    _StreamCandidate? firstHealthyTs;
-    if (hasHealthyMpegTs) {
-      for (final c in withFailures) {
-        if (c.transport == _StreamTransport.mpegTs &&
-            (_candidateFailureCount[c.signature] ?? 0) < 2) {
-          firstHealthyTs = c;
-          break;
-        }
-      }
-    }
+    final withFailures =
+        indexed.map((entry) => entry.value).toList(growable: false);
 
     final preferredSignature = _lastReadyCandidateSignature.isNotEmpty
         ? _lastReadyCandidateSignature
         : _preferredCandidateSignature;
     if (preferredSignature.isEmpty) {
-      if (firstHealthyTs != null &&
-          withFailures.first.signature != firstHealthyTs.signature) {
-        final out = <_StreamCandidate>[firstHealthyTs];
-        for (final c in withFailures) {
-          if (c.signature == firstHealthyTs.signature) continue;
-          out.add(c);
-        }
-        _log('prefer healthy TS candidate first: ${firstHealthyTs.signature}');
-        return out;
-      }
       return withFailures;
     }
 
@@ -1793,44 +1772,25 @@ class _ControlScreenState extends State<ControlScreen> {
     final preferred = withFailures[idx];
     final preferredFailures = _candidateFailureCount[preferred.signature] ?? 0;
     if (preferredFailures >= 3) return withFailures;
-    if (preferCompatibilityRelay &&
-        preferred.transport == _StreamTransport.mjpeg) {
+    final first = withFailures.first;
+    final firstFailures = _candidateFailureCount[first.signature] ?? 0;
+    if (preferred.transport == _StreamTransport.mpegTs &&
+        first.transport == _StreamTransport.mjpeg &&
+        preferredFailures >= firstFailures) {
+      return withFailures;
+    }
+    if (preferred.transport == _StreamTransport.mjpeg ||
+        preferredFailures < firstFailures ||
+        first.transport != _StreamTransport.mjpeg) {
       final out = <_StreamCandidate>[preferred];
       for (var i = 0; i < withFailures.length; i++) {
         if (i == idx) continue;
         out.add(withFailures[i]);
       }
-      _log('prefer last ready compatibility relay candidate first');
+      _log('preferred candidate moved to first: ${preferred.signature}');
       return out;
     }
-    if (firstHealthyTs != null &&
-        preferred.transport != _StreamTransport.mpegTs) {
-      if (withFailures.first.signature != firstHealthyTs.signature) {
-        final out = <_StreamCandidate>[firstHealthyTs];
-        for (final c in withFailures) {
-          if (c.signature == firstHealthyTs.signature) continue;
-          out.add(c);
-        }
-        _log(
-          'ignore preferred MJPEG and pin healthy TS first: ${firstHealthyTs.signature}',
-        );
-        return out;
-      }
-      return withFailures;
-    }
-
-    // Prefer last known-good candidate first to minimize startup latency.
-    if (hasHealthyMpegTs && preferred.transport != _StreamTransport.mpegTs) {
-      _log('prefer last ready candidate over TS for faster startup');
-    }
-
-    final out = <_StreamCandidate>[preferred];
-    for (var i = 0; i < withFailures.length; i++) {
-      if (i == idx) continue;
-      out.add(withFailures[i]);
-    }
-    _log('preferred candidate moved to first: ${preferred.signature}');
-    return out;
+    return withFailures;
   }
 
   void _resetStreamMetrics() {
@@ -1852,12 +1812,18 @@ class _ControlScreenState extends State<ControlScreen> {
     _streamReconnectTimer?.cancel();
     _streamReconnectTimer = null;
     final requestId = ++_streamRequestId;
+    final requestParams = _effectiveStreamParams;
+    final shouldUseProvisionalCandidate =
+        (_currentStreamCandidate == null) && (_streamRequestId == 1);
+    final provisionalCandidate = _provisionalLegacyCandidate();
     if (mounted) {
       setState(() {
         _resolvingStreamOffer = true;
         _streamStatus = reason;
-        _streamCandidates = const <_StreamCandidate>[];
-        _activeStreamCandidate = -1;
+        _streamCandidates = shouldUseProvisionalCandidate
+            ? <_StreamCandidate>[provisionalCandidate]
+            : const <_StreamCandidate>[];
+        _activeStreamCandidate = shouldUseProvisionalCandidate ? 0 : -1;
         _candidateStartupRetries = 0;
         _candidateReadyAtMs = 0;
         _streamWidgetNonce++;
@@ -1876,10 +1842,10 @@ class _ControlScreenState extends State<ControlScreen> {
         '/api/stream_offer',
         queryParameters: <String, String>{
           'low_latency': _effectiveLowLatency ? '1' : '0',
-          'audio': _settings.streamAudio ? '1' : '0',
-          'max_w': _adaptiveParams.maxWidth.toString(),
-          'quality': _adaptiveParams.quality.toString(),
-          'fps': _adaptiveParams.fps.toString(),
+          'audio': '0',
+          'max_w': requestParams.maxWidth.toString(),
+          'quality': requestParams.quality.toString(),
+          'fps': requestParams.fps.toString(),
           'cursor': '0',
         },
         timeout: _streamOfferTimeout,
@@ -1891,9 +1857,9 @@ class _ControlScreenState extends State<ControlScreen> {
           resolveCandidateUri: _resolveCandidateUri,
           token: widget.token,
           includeAuthQueryToken: _forceStreamQueryToken,
-          maxWidth: _adaptiveParams.maxWidth,
-          quality: _adaptiveParams.quality,
-          fps: _adaptiveParams.fps,
+          maxWidth: requestParams.maxWidth,
+          quality: requestParams.quality,
+          fps: requestParams.fps,
           lowLatency: _effectiveLowLatency,
         );
         _lastStreamOfferPayload = offer.raw;
@@ -1926,17 +1892,7 @@ class _ControlScreenState extends State<ControlScreen> {
       status = 'stream_offer error: $e';
     }
 
-    final fallback = _StreamCandidate(
-      uri: _legacyMjpegUri(
-        maxWidth: _adaptiveParams.maxWidth,
-        quality: _adaptiveParams.quality,
-        fps: _adaptiveParams.fps,
-      ),
-      mime: 'multipart/x-mixed-replace; boundary=frame',
-      transport: _StreamTransport.mjpeg,
-      backend: 'legacy_mjpeg',
-      signature: 'mjpeg|/video_feed|legacy',
-    );
+    final fallback = _provisionalLegacyCandidate();
 
     final withFallback = appendFallbackCandidateIfMissing(
       candidates: candidates
@@ -1976,7 +1932,8 @@ class _ControlScreenState extends State<ControlScreen> {
       final compatibleOnly = normalized
           .where((c) => c.transport == _StreamTransport.mjpeg)
           .toList(growable: false);
-      if (compatibleOnly.isNotEmpty && compatibleOnly.length != normalized.length) {
+      if (compatibleOnly.isNotEmpty &&
+          compatibleOnly.length != normalized.length) {
         normalized = compatibleOnly;
         status = status.isEmpty
             ? 'compatibility relay mode: MJPEG only'
@@ -2485,9 +2442,9 @@ class _ControlScreenState extends State<ControlScreen> {
             'jitter_ms': jitterMs.toStringAsFixed(1),
             'drop_ratio': dropRatio.toStringAsFixed(3),
             'decode_fps': max(0.0, effectiveFps).toStringAsFixed(2),
-            'max_w': _adaptiveParams.maxWidth.toString(),
-            'quality': _adaptiveParams.quality.toString(),
-            'fps': _adaptiveParams.fps.toString(),
+            'max_w': _effectiveStreamParams.maxWidth.toString(),
+            'quality': _effectiveStreamParams.quality.toString(),
+            'fps': _effectiveStreamParams.fps.toString(),
             'low_latency': _effectiveLowLatency ? '1' : '0',
           },
           timeout: const Duration(seconds: 1),
@@ -2661,7 +2618,7 @@ class _ControlScreenState extends State<ControlScreen> {
       'stream_candidate_pref_${_endpoint.host}_${_endpoint.port}';
 
   Widget _buildActiveStreamWidget() {
-    if (_resolvingStreamOffer) {
+    if (_resolvingStreamOffer && _currentStreamCandidate == null) {
       return const Center(
           child: CircularProgressIndicator(color: Color(0xFF00FF9D)));
     }
@@ -2689,9 +2646,10 @@ class _ControlScreenState extends State<ControlScreen> {
       );
     }
 
+    final effectiveParams = _effectiveStreamParams;
     final key = ValueKey(
       'stream-$_streamWidgetNonce-$_activeStreamCandidate-'
-      '${candidate.transport.name}-${_adaptiveParams.maxWidth}-${_adaptiveParams.quality}-${_adaptiveParams.fps}',
+      '${candidate.transport.name}-${effectiveParams.maxWidth}-${effectiveParams.quality}-${effectiveParams.fps}',
     );
 
     switch (candidate.transport) {
@@ -3268,16 +3226,6 @@ class _ControlScreenState extends State<ControlScreen> {
                 icon: const Icon(Icons.menu_book, size: 16),
                 label: Text(_tr('Решение', 'Fix')),
               ),
-              const SizedBox(width: 4),
-              TextButton.icon(
-                onPressed: _recoveryInProgress
-                    ? null
-                    : () => unawaited(_runSmartRecovery()),
-                icon: const Icon(Icons.auto_fix_high, size: 16),
-                label: Text(_recoveryInProgress
-                    ? _tr('Восстановление...', 'Recovering...')
-                    : _tr('Автовосстановление', 'Auto-recovery')),
-              ),
             ],
           ),
         ],
@@ -3331,7 +3279,8 @@ class _ControlScreenState extends State<ControlScreen> {
   }
 
   String _diagnosticsAccessMode(Map<String, dynamic> access) {
-    final effectiveOrigin = (access['effective_origin'] ?? '').toString().trim();
+    final effectiveOrigin =
+        (access['effective_origin'] ?? '').toString().trim();
     final fallbackOrigin = _endpointOriginLabel();
     final origin = effectiveOrigin.isEmpty ? fallbackOrigin : effectiveOrigin;
     final host = Uri.tryParse(origin)?.host ?? _endpoint.host;
@@ -3406,21 +3355,23 @@ class _ControlScreenState extends State<ControlScreen> {
   Future<DiagnosticsSnapshot> _buildDiagnosticsSnapshot() async {
     final now = DateTime.now().toIso8601String();
     final candidate = _currentStreamCandidate;
+    final requestParams = _effectiveStreamParams;
 
     final diagPayload = await _fetchJson('/api/diag', timeoutSeconds: 3);
     final streamOffer = await _fetchJson(
       '/api/stream_offer',
       query: <String, String>{
         'low_latency': _effectiveLowLatency ? '1' : '0',
-        'audio': _settings.streamAudio ? '1' : '0',
-        'max_w': _adaptiveParams.maxWidth.toString(),
-        'quality': _adaptiveParams.quality.toString(),
-        'fps': _adaptiveParams.fps.toString(),
+        'audio': '0',
+        'max_w': requestParams.maxWidth.toString(),
+        'quality': requestParams.quality.toString(),
+        'fps': requestParams.fps.toString(),
         'cursor': '0',
       },
       timeoutSeconds: 3,
     );
-    final diagData = diagPayload.data ?? <String, dynamic>{'error': diagPayload.error};
+    final diagData =
+        diagPayload.data ?? <String, dynamic>{'error': diagPayload.error};
     final streamOfferData = streamOffer.data ??
         _lastStreamOfferPayload ??
         <String, dynamic>{'error': streamOffer.error};
@@ -3431,7 +3382,8 @@ class _ControlScreenState extends State<ControlScreen> {
     final streamAudio = _diagMap(diagStream['audio']);
     final offerAudio = _diagMap(streamOfferData['audio']);
     final endpointOrigin = _endpointOriginLabel();
-    final effectiveOrigin = (diagAccess['effective_origin'] ?? '').toString().trim();
+    final effectiveOrigin =
+        (diagAccess['effective_origin'] ?? '').toString().trim();
 
     final report = <String, dynamic>{
       'generated_at': now,
@@ -3454,7 +3406,7 @@ class _ControlScreenState extends State<ControlScreen> {
         'network_profile': _settings.networkProfile,
         'low_latency_requested': _settings.lowLatency,
         'low_latency_effective': _effectiveLowLatency,
-        'stream_audio_enabled': _settings.streamAudio,
+        'stream_audio_enabled': false,
         'audio_relay_active': _shouldPlayAudioRelay,
         'fps': _streamFps,
         'render_fps': _streamRenderFps,
@@ -3493,7 +3445,8 @@ class _ControlScreenState extends State<ControlScreen> {
           : '${candidate.transport.name} ${candidate.backend}',
       backend: _streamBackend,
       endpoint: endpointOrigin,
-      effectiveOrigin: effectiveOrigin.isEmpty ? endpointOrigin : effectiveOrigin,
+      effectiveOrigin:
+          effectiveOrigin.isEmpty ? endpointOrigin : effectiveOrigin,
       accessMode: _diagnosticsAccessMode(diagAccess),
       sessionStatus: _diagnosticsSessionStatus(diagSession),
       wsStatus: _diagnosticsWsStatus(diagWs),
@@ -4079,22 +4032,24 @@ class _ControlScreenState extends State<ControlScreen> {
                               onTap: () =>
                                   setState(() => _rot = (_rot + 90) % 360),
                             ),
-                            const SizedBox(width: 6),
-                            _iconBtn(
-                              _settings.streamAudio
-                                  ? Icons.volume_up
-                                  : Icons.volume_off,
-                              tooltip: _settings.streamAudio
-                                  ? _tr('Звук потока: ВКЛ', 'Stream audio: ON')
-                                  : _tr(
-                                      'Звук потока: ВЫКЛ', 'Stream audio: OFF'),
-                              active: _settings.streamAudio,
-                              color: _settings.streamAudio
-                                  ? kAccentColor
-                                  : Colors.orangeAccent,
-                              compact: true,
-                              onTap: () => unawaited(_toggleStreamAudio()),
-                            ),
+                            if (_settings.streamAudio) const SizedBox(width: 6),
+                            if (_settings.streamAudio)
+                              _iconBtn(
+                                _settings.streamAudio
+                                    ? Icons.volume_up
+                                    : Icons.volume_off,
+                                tooltip: _settings.streamAudio
+                                    ? _tr(
+                                        'Звук потока: ВКЛ', 'Stream audio: ON')
+                                    : _tr('Звук потока: ВЫКЛ',
+                                        'Stream audio: OFF'),
+                                active: _settings.streamAudio,
+                                color: _settings.streamAudio
+                                    ? kAccentColor
+                                    : Colors.orangeAccent,
+                                compact: true,
+                                onTap: () => unawaited(_toggleStreamAudio()),
+                              ),
                             const SizedBox(width: 6),
                             _iconBtn(
                               Icons.network_check,
@@ -4109,24 +4064,6 @@ class _ControlScreenState extends State<ControlScreen> {
                               compact: true,
                               onTap: () =>
                                   unawaited(_showNetworkProfileSheet()),
-                            ),
-                            const SizedBox(width: 6),
-                            _iconBtn(
-                              Icons.auto_fix_high,
-                              tooltip: _recoveryInProgress
-                                  ? _tr(
-                                      'Автовосстановление выполняется...',
-                                      'Auto-recovery is running...',
-                                    )
-                                  : _tr('Автовосстановление', 'Auto-recovery'),
-                              active: _recoveryInProgress,
-                              color: _recoveryInProgress
-                                  ? Colors.orangeAccent
-                                  : Colors.white70,
-                              compact: true,
-                              onTap: _recoveryInProgress
-                                  ? () {}
-                                  : () => unawaited(_runSmartRecovery()),
                             ),
                           ],
                         ),
